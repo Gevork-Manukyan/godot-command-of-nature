@@ -1,0 +1,10 @@
+[gd_scene format=3 uid="uid://caw58d8i6npq6"]
+
+[ext_resource type="Script" uid="uid://c10yl51kvs7y4" path="res://card.gd" id="1_kikvd"]
+
+[node name="Card" type="Button" unique_id=1113860051]
+offset_right = 120.0
+offset_bottom = 170.0
+tooltip_text = "A♠"
+text = "A♠"
+script = ExtResource("1_kikvd")
