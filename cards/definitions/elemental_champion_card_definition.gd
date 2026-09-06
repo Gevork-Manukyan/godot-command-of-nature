@@ -1,0 +1,4 @@
+class_name ElementalChampionCardDefinition
+extends ElementalWarriorCardDefinition
+
+@export var level_requirement: int

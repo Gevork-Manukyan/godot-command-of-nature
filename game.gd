@@ -49,14 +49,19 @@ func deal_card(hand: HBoxContainer, is_player: bool):
 	var card_data = deck.pop_back()
 	var card = CARD_SCENE.instantiate()
 
-	if is_player:
-		card.text = card_data["rank"] + card_data["suit"]
-		card.card_selected.connect(_on_card_selected)
-	else:
-		card.text = "??"
-		card.disabled = true
-
 	hand.add_child(card)
+
+	card.setup(
+		card_data["rank"],
+		card_data["suit"],
+		is_player
+	)
+
+	if not is_player:
+		print("Hidden opponent card: ", card.rank, card.suit)
+
+	if is_player:
+		card.card_selected.connect(_on_card_selected)
 
 
 func _on_card_selected(card: Button):
