@@ -19,6 +19,13 @@ var deck: Deck
 var discard_pile: CardZone
 var removed_pile: CardZone
 var gold: GoldPool
+## This player's own Sage card instance, set once by PlayerSetup when it's
+## placed on the formation. Anything that needs "your Sage" (SELF_SAGE
+## target resolution, FactionActions' level-8 abilities) should read this
+## directly rather than searching `formation` for one -- on a 4-player
+## team's shared formation there are two Sages, and Formation.get_sage()
+## can't tell them apart.
+var sage: CardInstance
 ## The 3 Champions from this player's Sage pack, face down until level_up()
 ## reveals them.
 var locked_champions: Array[ElementalChampionCardDefinition] = []
@@ -28,20 +35,26 @@ var level: int = 1
 ## rulebook, so this only ever grows. Turn.can_use_faction_action() checks it.
 var unlocked_faction_action_levels: Array[int] = []
 
-func _init():
-	formation = Formation.new_two_player()
+func _init(shared_formation: Formation = null, shared_gold: GoldPool = null):
+	formation = shared_formation if shared_formation != null else Formation.new_two_player()
 	hand = CardZone.new()
 	deck = Deck.new()
 	discard_pile = CardZone.new()
 	removed_pile = CardZone.new()
-	gold = GoldPool.new(12)
+	gold = shared_gold if shared_gold != null else GoldPool.new(12)
 
 ## Call once per Elemental this player defeats in combat (see
 ## CombatResolver.resolve_attack()'s defeated_count). Crossing a threshold
 ## unlocks that level's faction action and moves the matching locked
-## Champion into the discard pile, per the rulebook.
+## Champion into the discard pile, per the rulebook. No-ops once this
+## player's own Sage is defeated -- per the rulebook (4-player mode: "if
+## your Sage is defeated but your teammate's Sage is not, you may continue
+## playing; however, you cannot use any faction actions or increase your
+## level ... for the remainder of the game"). In 2-player this is moot --
+## the match is already over once your lone Sage falls (see Match) -- but
+## the check is harmless there too.
 func level_up() -> void:
-	if level >= MAX_LEVEL:
+	if level >= MAX_LEVEL or (sage != null and sage.is_defeated()):
 		return
 	level += 1
 	if LEVEL_THRESHOLDS.has(level):

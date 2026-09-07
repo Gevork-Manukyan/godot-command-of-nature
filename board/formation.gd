@@ -144,6 +144,12 @@ func find_space_of(card: CardInstance) -> int:
 			return space.space_number
 	return -1
 
+## Returns *a* Sage on this formation, not necessarily a specific player's.
+## Safe for 2-player (there's only one). On a 4-player team's shared
+## formation there are two, and which one this returns is unspecified --
+## anything that needs "my Sage" specifically (SELF_SAGE target resolution,
+## FactionActions' level-8 abilities) should use PlayerState.sage /
+## TargetContext.self_sage instead, not this.
 func get_sage() -> CardInstance:
 	for space in spaces:
 		if space.card != null and space.card.definition is ElementalSageCardDefinition:

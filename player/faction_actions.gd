@@ -20,6 +20,12 @@ class_name FactionActions
 ## None of these re-validate that a chosen space/index is legal beyond a
 ## null check -- same contract as EffectExecutor: callers choose, these
 ## execute.
+##
+## The 4 level-8/level-4 actions needing "your Sage" (torrent_level_8,
+## gravel_level_4/8, porella_level_8) read it from context.targets.self_sage
+## rather than searching self_formation for one -- a 4-player team's shared
+## formation has two Sages, so the caller must populate self_sage from the
+## acting player's own PlayerState.sage (set once by PlayerSetup).
 
 # ------------ TORRENT (Droplet) ------------
 
@@ -41,7 +47,7 @@ static func torrent_level_6(context: EffectContext, space1: int, space2: int) ->
 ## your Sage's position in your formation. Row I: 4 DMG, Row II: 3 DMG,
 ## Row III: 2 DMG."
 static func torrent_level_8(context: EffectContext, target_space: int) -> void:
-	var sage := context.targets.self_formation.get_sage()
+	var sage := context.targets.self_sage
 	if sage == null:
 		return
 	var sage_row := context.targets.self_formation.get_space(context.targets.self_formation.find_space_of(sage)).row
@@ -55,7 +61,7 @@ static func torrent_level_8(context: EffectContext, target_space: int) -> void:
 ## Level 4: "Add 1 shield to each Pebble Elemental connected to your Sage."
 static func gravel_level_4(context: EffectContext) -> void:
 	var formation := context.targets.self_formation
-	var sage := formation.get_sage()
+	var sage := context.targets.self_sage
 	if sage == null:
 		return
 	for card in formation.get_connected_cards(formation.find_space_of(sage)):
@@ -88,7 +94,7 @@ static func gravel_level_6_distribute(context: EffectContext, distribution: Dict
 ## Level 8: "Remove up to 2 shields from your Sage to deal DMG to an
 ## Elemental in your opponent's formation. 1 shield: 2 DMG, 2 shields: 4 DMG."
 static func gravel_level_8(context: EffectContext, shields_to_spend: int, target_space: int) -> bool:
-	var sage := context.targets.self_formation.get_sage()
+	var sage := context.targets.self_sage
 	if sage == null or shields_to_spend < 1 or shields_to_spend > 2 or sage.shield_count < shields_to_spend:
 		return false
 	sage.shield_count -= shields_to_spend
@@ -180,7 +186,7 @@ static func porella_level_6(context: EffectContext, discard_index: int) -> CardD
 ## then deal 3 DMG to an Elemental in your opponent's formation."
 static func porella_level_8(context: EffectContext, source_space: int, target_space: int) -> bool:
 	var formation := context.targets.self_formation
-	var sage := formation.get_sage()
+	var sage := context.targets.self_sage
 	if sage == null:
 		return false
 	var sage_space := formation.find_space_of(sage)

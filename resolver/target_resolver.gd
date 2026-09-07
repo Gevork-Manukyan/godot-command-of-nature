@@ -24,9 +24,10 @@ static func get_candidates(target: AbilityTarget, context: TargetContext, requir
 			return _single(formation_for(target, context), context.source_card)
 		CardEnums.TargetScope.ATTACKING_ELEMENTAL:
 			return _single(formation_for(target, context), context.attacking_card)
-		CardEnums.TargetScope.SELF_SAGE, CardEnums.TargetScope.ENEMY_SAGE:
-			var formation := formation_for(target, context)
-			return _single(formation, formation.get_sage())
+		CardEnums.TargetScope.SELF_SAGE:
+			return _single(context.self_formation, context.self_sage)
+		CardEnums.TargetScope.ENEMY_SAGE:
+			return _single(context.enemy_formation, context.enemy_sage)
 		CardEnums.TargetScope.ROW:
 			return _by_occupancy(formation_for(target, context), require_occupied, target.rows)
 		CardEnums.TargetScope.FORMATION:

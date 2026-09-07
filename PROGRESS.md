@@ -851,6 +851,242 @@ Both are reminders that shared formation state across sequential test
 sections needs each section to account for what earlier sections did to it.
 Deleted the temporary script after all values matched expected output.
 
+## 4-player team setup (2026-09-06)
+
+Extended `PlayerSetup` to build a 4-player team (2 players sharing one
+Formation and one GoldPool) alongside the existing 2-player `new_player()`,
+without duplicating the Sage-pack-splitting logic between them.
+
+**Source for the space layout**: the old TS repo's `Team.ts`
+(`initBattlefield`/`initWarriors2Decks`), fetched directly from GitHub since
+this wasn't something the wiki (card text only) or a quick rules.pdf lookup
+could answer — text extraction on `rules.pdf` failed outright (`textutil`
+silently returned the original PDF bytes rather than real text, and this
+repo has no `pdftottext`/poppler installed; declined to install it
+mid-session rather than reach for a new system tool without asking first).
+The user answered the one remaining open question directly instead
+(4-player's second-team starting gold is **4**, not simply double the
+2-player value of 3 — confirmed by the user, not derived).
+
+`Team.ts` confirmed the shared 12-space formation splits into two disjoint
+per-player halves, each laid out exactly like the 2-player case's spaces
+1-3/4-6, just at different space numbers: player 1 gets Row I/II spaces
+1,3,4 and Row III spaces 7 (left warrior)/8 (Sage)/9 (right warrior); player
+2 gets 2,5,6 and 10,11,12. Confirmed this against `Formation.new_four_player_team()`'s
+existing adjacency data (row_capacities `[2,4,6]`, spaces 1-2 = row 1, 3-6 =
+row 2, 7-12 = row 3) — no changes needed there, it already matched.
+
+**Refactor**: extracted `PlayerSetup._setup_player(state, sage_name,
+chosen_warrior_names, basic_spaces, warrior_sage_warrior_spaces)` as the one
+place the Sage-pack-splitting logic lives — `new_player()` calls it once
+with spaces `[1,2,3]`/`[4,5,6]`, `new_team()` calls it twice with
+`[1,3,4]`/`[7,8,9]` and `[2,5,6]`/`[10,11,12]`. Only the space numbers
+differ; hand/deck/discard/locked-Champions logic is identical, applying
+[[feedback-shared-logic-not-duplicated]] proactively rather than copy-pasting
+`new_player()`'s body a second time with different literals.
+
+**`PlayerState` constructor** gained optional `shared_formation`/`shared_gold`
+params (defaulting to `null`, which preserves the existing "build my own"
+2-player behavior exactly) so `new_team()` can construct both teammates
+against the same `Formation`/`GoldPool` instances instead of each getting
+their own.
+
+Verified headlessly: 2-player `new_player()` behavior unchanged; a 4-player
+team's two `PlayerState`s share the same `Formation`/`GoldPool` object
+identity; each player's 6 cards land on their own disjoint half with no
+space collisions (all 12 spaces filled, zero overlap); starting gold is 0/4
+for goes_first/not (not 0/3 — team, not individual, and a different
+number); hand/deck/level/locked-Champions stay individual per player; and
+an invalid Warrior choice for the second player fails cleanly, leaving that
+player's 6 spaces empty while the first player's cards (already placed)
+are untouched.
+
+**New gap found, not yet closed**: `Formation.get_sage()`/`has_sage()`
+return the *first* Sage found and assume there's only one — true for
+2-player, but a 4-player shared formation has two. Nothing calls these
+during setup, but `FactionActions`' Torrent/Gravel/Cedar level-8 functions
+(and Porella level-8) all call `formation.get_sage()` to find "your Sage,"
+which will silently return the wrong player's Sage half the time in
+4-player. This blocks 4-player faction actions specifically until
+`Formation` gets some notion of "whose Sage" (an owner-scoped lookup, or
+`get_sages()` plural with the caller picking).
+
+## Owner-aware Sage lookup (2026-09-06)
+
+Closed the gap noted just above. `Formation.get_sage()` can't tell two
+Sages apart on a shared 4-player formation, and it turned out to have
+**two** real call sites, not one: `FactionActions`' level-4/8 functions
+(already known), plus `TargetResolver.get_candidates()`'s `SELF_SAGE`/
+`ENEMY_SAGE` case — used by real card data (Jade Titan: "add 1 shield to
+your Sage"), so this was a latent 4-player bug in card abilities too, not
+just faction actions.
+
+**Fix**: stopped deriving "my Sage" by searching the formation at all.
+`PlayerState` gained a `sage: CardInstance` field, set once by
+`PlayerSetup._setup_player()` at the exact moment it places the Sage (no
+search needed — the setup code already knows). `TargetContext` gained
+`self_sage`/`enemy_sage` fields (symmetric, matching the existing
+`self_hand`/`enemy_hand` pattern — `enemy_sage` has no real caller yet,
+same as `enemy_hand`/`enemy_discard_pile` when those were added). Both
+`TargetResolver`'s `SELF_SAGE`/`ENEMY_SAGE` case and all 4 of
+`FactionActions`' Sage-needing functions now read `context.targets.self_sage`
+directly instead of calling `formation.get_sage()`. `Formation.get_sage()`/
+`has_sage()` themselves are unchanged (still useful for 2-player and any
+"is there any Sage here at all" check) but their doc comments now say
+plainly that they return *a* Sage, not a specific player's, and shouldn't
+be used where ownership matters.
+
+Verified headlessly with a 4-player team (Torrent + Gravel sharing one
+formation, Sages at spaces 8 and 11): confirmed `Formation.get_sage()`
+really does always return player 1's Sage first (proving the bug was real,
+not hypothetical — spaces are scanned in ascending order and player 1
+always occupies the lower half); then ran `gravel_level_8` as player 2 —
+the exact case the old code would have gotten wrong — and confirmed it
+correctly spent player 2's own Sage's shields (not player 1's, which stayed
+untouched) and dealt the right damage; also confirmed `torrent_level_8` as
+player 1 and the `SELF_SAGE` target-resolution path directly, both
+resolving the correct owner's Sage. One test-setup bug caught along the
+way (not a real bug): a card defeated in an earlier sub-test needed
+re-adding to the formation before reuse in a later one — same pattern
+already seen once before in the faction-actions verification pass.
+
+## 4-player team turn/game flow (2026-09-07)
+
+Generalized `Turn` to run either a 2-player turn or a 4-player team's turn,
+instead of building a separate class. Confirmed with the user first: 4-player
+AP is a flat **6** shared between the 2 teammates for their whole team-turn,
+*not* simply double the 2-player value of 4 (the old TS repo's `ActiveConGame`
+suggested 3/6 — a clean double — but that 3 conflicts with our own
+already-verified 4 for 2-player, so it wasn't trustworthy here; asked the
+user directly rather than guess).
+
+**Source for the team-turn structure**: fetched `ConGame.ts` (specifically
+`ActiveConGame`) from the old repo, which confirmed turns are per-*team*, not
+per-player — one team is "active," both teammates act against one shared AP
+pool during that team's turn, then it flips. This matches what was already
+confirmed earlier about 4-player sharing (shared Formation + AP; hand/deck/
+discard/level stay individual; either teammate can attack with any Elemental
+on the shared formation, just not the same one twice) — no new rule
+questions needed there.
+
+**Design**: `Turn.players: Array[PlayerState]` replaces the old single
+`player: PlayerState` (1 entry = 2-player, 2 = a team) — `opponents` is now
+an array too, for symmetry, though nothing inside `Turn` reads it either way
+(same as before). Every action touching an individual zone (hand/deck/
+discard/removed pile) gained a `player_index: int = 0` parameter, defaulting
+to 0 so every 2-player call site is unaffected. Actions that only touch
+shared state never got one: `swap_connected()`, `buy_and_summon_from_market()`,
+`refresh_market()` all work identically whichever teammate calls them, since
+formation/gold are the literal same shared objects PlayerSetup.new_team()
+already wired up — no new sharing logic needed in `Turn` itself, just reading
+off `players[0]` for those (any index works, they're the same object).
+`can_end_cleanup()` became a team-wide check (every player's hand ≤ 5, not
+just one) since ending a team's turn requires both teammates' hands legal.
+`can_use_faction_action()`/`spend_faction_action_ap()` gained `player_index`
+too, since the once-per-turn/AP-cost checks are team-wide but the *unlocked
+levels* check is per-player (leveling is per-player even in team mode,
+confirmed earlier).
+
+**Real bug found and fixed, not new to this session's changes**: while
+verifying, a Close Strike attack dealt 0 damage instead of the attacker's
+STR. Traced it to `Turn.play_attack_command()` never setting
+`context.targets.attacking_card` before calling `CombatResolver.resolve_attack()`
+— `ATTACKER_STRENGTH`-sourced damage (what Close Strike/Far Strike and most
+other Attack Commands use) reads that field and silently resolves to 0 if
+it's null. `FactionActions.porella_level_4` already did this correctly
+(explicitly setting it before its own `resolve_attack()` call), which is
+what made the gap in `Turn` visible by contrast. Fixed by having
+`play_attack_command()` set it itself from its own `attacker` parameter,
+rather than leaving it as a caller footgun — it already receives `attacker`,
+so there's no reason to make every caller separately duplicate it onto the
+context too.
+
+Verified headlessly: 2-player `Turn` behavior fully unchanged (4 AP); a
+4-player team's `Turn` starts at 6 AP shared across both teammates' draws;
+either teammate can attack with any card on the shared formation (tested
+player 2 successfully attacking with player 1's Elemental); the same card
+can't be attacked with twice by either teammate (team-wide
+`attacked_this_turn`); a defeated attack raises the *acting* player's level
+specifically, leaving the other teammate's level untouched; faction-action
+eligibility correctly differs per player even though AP/phase are shared;
+a market purchase lands in the *buying* player's own discard pile;
+`buy_and_summon_from_market` needs no player attribution since it only
+touches shared state; and `can_end_cleanup()` correctly goes false when
+either teammate's hand is oversized and true again once both are fixed.
+
+## Match-level orchestration + a working PDF pipeline (2026-09-07)
+
+**Tooling first**: every prior phase that needed a rules.pdf fact had to ask
+the user directly, because text extraction kept failing on this machine —
+no `pdftotext`/poppler installed, and macOS `textutil`/Spotlight indexing
+turned out not to actually extract PDF text either (silently returned raw
+PDF bytes or nothing). With the user's explicit go-ahead, installed poppler
+via `brew install poppler`, ran `pdftotext -layout rules.pdf`, and got real,
+searchable rules text for the first time this project. Read directly:
+
+- **"How to Win"**: 2-player — defeat your opponent's Sage. 4-player — your
+  team wins once you've defeated **both** of the opposing team's Sages.
+  Confirms exactly what the user had already told us when asked directly
+  (every fact-check this session — 2p/4p gold, AP, this loss condition —
+  matched the user's answers exactly; the old TS repo's numbers were the
+  only source that ever disagreed).
+- **A genuinely new rule, not previously modeled**: "If your Sage is
+  defeated but your teammate's Sage is not, you may continue playing;
+  however, you cannot use any faction actions or increase your level ... for
+  the remainder of the game." A half-defeated 4-player teammate keeps
+  drawing/summoning/attacking/buying normally — only faction actions and
+  leveling are permanently cut off for *that player specifically*, not their
+  still-alive teammate.
+- Everything else already built (2p/4p AP values, both starting-gold
+  numbers, once-faction-action-per-turn, teammate hand visibility without
+  play access, the row-shift-forward-on-defeat direction) matched the
+  extracted text exactly — a full retroactive confirmation that nothing
+  built on user-provided facts alone was actually wrong.
+
+Per the user's explicit instruction, uninstalled poppler (`brew uninstall
+poppler`) once done reading — it was a one-time extraction tool for this
+session, not a project dependency, and the extracted text (kept only in a
+scratch file) was deleted after use.
+
+**Closed the "new rule" gap**: `PlayerState.level_up()` now no-ops once that
+player's own Sage is defeated; `Turn.can_use_faction_action()` now also
+checks the acting player's own Sage isn't defeated (in addition to the
+existing unlock/AP/once-per-turn checks) — both read `PlayerState.sage.is_defeated()`
+directly rather than introducing separate tracked state, since it's already
+the ground truth.
+
+**`game/match.gd`** — new `Match` class, the orchestration layer above
+`Turn`: tracks `side_a`/`side_b` (each 1 PlayerState for 2-player, 2 for a
+4-player team — built beforehand by `PlayerSetup`, `Match` doesn't build
+rosters itself), `active_side`, and `current_turn: Turn`. `winner()`/
+`is_over()` implement the win condition above generically for both player
+counts (a side loses once *every* one of its Sages is defeated — trivially
+just the one Sage in 2-player). `finish_turn()` validates the active side's
+`Turn` actually reached and passed `CLEANUP` (via `Turn.advance_phase()`,
+which already gates on `can_end_cleanup()`), checks the win condition before
+handing off, and only starts a new `Turn` for the other side if the match
+isn't already over. Which side goes first is a parameter, not something
+`Match` decides — the rulebook's tiebreak ("most house plants") is a
+real-world decision outside the game state, same as who chooses gold/goes
+first already was.
+
+The "which formation is enemy in 4-player" question from the earlier
+deferred note turned out not to be a real gap: since each team has exactly
+one shared formation (not one per player), `Turn.opponents[0].formation` —
+already exposed since the team-turn work — is unambiguous. No new lookup
+was needed.
+
+Verified headlessly: 2-player match end-to-end (`finish_turn()` correctly
+refuses before `CLEANUP`, correctly hands off to the other side once legal,
+`winner()` flips to 0 once the opposing Sage is defeated, and a further
+`finish_turn()` call on an already-decided match advances the phase but
+does not start a new turn); 4-player team match where one teammate's Sage
+falls first (match correctly stays ongoing, that teammate's own
+`can_use_faction_action`/`level_up()` are blocked while their still-alive
+teammate's are proven unaffected — tested by unlocking the same level on
+both and getting different results), then the second Sage falls and the
+match correctly ends with the right side declared winner.
+
 ## Not done yet / explicitly deferred
 - **The ~50 extra cards found on the wiki** (new Warriors like Aqua Acrobat/
   Cobra King/Rock Buck, new Attacks/Instants, and a whole new "Ritual Command"
@@ -874,26 +1110,16 @@ Deleted the temporary script after all values matched expected output.
   `ON_MELEE_ATTACK`/`ON_RANGED_ATTACK`/`ON_DAMAGE_DEALT`/`ON_DEFEAT_ENEMY`),
   returning anything needing a fresh target choice rather than executing or
   dropping it silently.
-- **4-player setup and faction actions** — `PlayerSetup`/`Turn` only
-  build/track the 2-player case. 4-player setup also needs to place a second
-  player's Sage pack onto a *shared* 12-space formation
-  (`Team.initWarriors2Decks`-style — matching same-element choices to the
-  correct half) and share one gold pool at the team level, which needs the
-  different Team-level composition flagged on `PlayerState`. **Leveling is
-  confirmed per-player, not per-team** (per the rulebook — user confirmed
-  2026-09-06), so `PlayerState.level`/`unlocked_faction_action_levels` as
-  built already have the right scope for 4-player too; only
-  Formation/GoldPool need to move to a shared Team-level object.
+- **Game setup flow above `Match`** — `Match` orchestrates turns/win
+  condition once both sides already exist, but there's still no code path
+  from "players pick Sages/Warriors" through to a running `Match` (the old
+  repo's `GameState`'s JOINING_GAME/SAGE_SELECTION/WARRIOR_SELECTION phases
+  have no equivalent here) — not needed until there's a UI to drive it.
 - Tokens as physical/visual game elements (vs. the plain `int` counters
   already on `CardInstance`) — not relevant until there's a UI.
 - Old prototype's `game.gd`/`card.gd` not yet connected to any of the new
   `cards/`/`board/`/`zones/`/`resolver/`/`market/`/`player/` systems — still
   the original standard-deck 2-card-hand demo.
-- 4-player/team rules — the data model stays ready for them (`Formation`
-  supports both sizes, `TargetContext` has enemy-side hand/discard fields),
-  but no actual 4-player game flow exists. Confirmed with the user: a
-  teammate's hand can be *viewed*, never played from — that's the only
-  4-player-specific rule interaction found so far.
 - No card art (`art` is unset on every card — old repo also had `img: ""` for
   everything, so there's nothing to port yet).
 
