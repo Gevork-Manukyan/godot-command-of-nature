@@ -12,10 +12,12 @@ class_name EffectExecutor
 ## must get it from Formation.get_valid_summon_spaces() first (same
 ## player-choice pattern as a normal summon).
 ##
-## Actions that modify an in-progress attack (REDUCE_DAMAGE, NEGATE_DAMAGE,
-## DONT_REMOVE_BOOST, DONT_REMOVE_SHIELD, REDIRECT_DAMAGE_TO_SELF) need a
-## combat-resolution sequence that doesn't exist yet -- they push_error and do
-## nothing rather than silently no-op.
+## REDUCE_DAMAGE/NEGATE_DAMAGE only make sense as Instant Command responses
+## within an attack -- see CombatResolver, which reads their resolved amount
+## directly rather than calling execute() on them. DONT_REMOVE_BOOST/
+## DONT_REMOVE_SHIELD/REDIRECT_DAMAGE_TO_SELF are passive triggered abilities
+## that need trigger detection (not built yet) to even know when they apply;
+## all 5 push_error rather than silently no-op if called directly.
 static func execute(effect: AbilityEffect, chosen_per_target: Array, context: EffectContext, destination_space: int = -1) -> void:
 	match effect.action:
 		CardEnums.AbilityAction.COLLECT_GOLD:
@@ -25,9 +27,9 @@ static func execute(effect: AbilityEffect, chosen_per_target: Array, context: Ef
 		CardEnums.AbilityAction.DEAL_DAMAGE:
 			_deal_damage(effect, chosen_per_target, context)
 		CardEnums.AbilityAction.ADD_SHIELD:
-			_for_each_target_card(effect, chosen_per_target, context, func(card): card.shield_count += _resolve_amount(effect, context))
+			_for_each_target_card(effect, chosen_per_target, context, func(card): card.shield_count += resolve_amount(effect, context))
 		CardEnums.AbilityAction.ADD_BOOST:
-			_for_each_target_card(effect, chosen_per_target, context, func(card): card.boost_count += _resolve_amount(effect, context))
+			_for_each_target_card(effect, chosen_per_target, context, func(card): card.boost_count += resolve_amount(effect, context))
 		CardEnums.AbilityAction.REMOVE_ALL_DAMAGE:
 			_for_each_target_card(effect, chosen_per_target, context, func(card): card.current_damage = 0)
 		CardEnums.AbilityAction.REMOVE_ALL_BOOSTS_AND_SHIELDS:
@@ -48,14 +50,18 @@ static func execute(effect: AbilityEffect, chosen_per_target: Array, context: Ef
 			_move_zone_to_zone(chosen_per_target, context.targets.self_discard_pile, context.targets.self_hand)
 		CardEnums.AbilityAction.MOVE_TO_DISCARD_FROM_HAND:
 			context.last_discarded_count = _move_zone_to_zone(chosen_per_target, context.targets.self_hand, context.targets.self_discard_pile)
-		CardEnums.AbilityAction.REDUCE_DAMAGE, CardEnums.AbilityAction.NEGATE_DAMAGE, \
+		CardEnums.AbilityAction.REDUCE_DAMAGE, CardEnums.AbilityAction.NEGATE_DAMAGE:
+			push_error("EffectExecutor: %s only makes sense inside an attack -- use CombatResolver.resolve_attack()'s instant_effects instead of calling execute() directly" % CardEnums.AbilityAction.keys()[effect.action])
 		CardEnums.AbilityAction.DONT_REMOVE_BOOST, CardEnums.AbilityAction.DONT_REMOVE_SHIELD, \
 		CardEnums.AbilityAction.REDIRECT_DAMAGE_TO_SELF:
-			push_error("EffectExecutor: %s needs an in-progress combat resolution, not implemented yet" % CardEnums.AbilityAction.keys()[effect.action])
+			push_error("EffectExecutor: %s needs trigger detection (checking a card's own triggered abilities), not implemented yet" % CardEnums.AbilityAction.keys()[effect.action])
 		_:
 			push_error("EffectExecutor: unhandled AbilityAction %s" % effect.action)
 
-static func _resolve_amount(effect: AbilityEffect, context: EffectContext) -> int:
+## Public because CombatResolver also needs it (for base attack damage and
+## Instant Command reduction amounts) -- one shared function instead of two
+## files re-deriving the same formula.
+static func resolve_amount(effect: AbilityEffect, context: EffectContext) -> int:
 	var base := 0
 	match effect.amount_source:
 		CardEnums.AmountSource.FIXED:
@@ -91,20 +97,26 @@ static func _collect_gold(effect: AbilityEffect, context: EffectContext) -> void
 	if context.self_gold == null:
 		push_error("EffectExecutor: COLLECT_GOLD needs EffectContext.self_gold")
 		return
-	context.self_gold.add(_resolve_amount(effect, context))
+	context.self_gold.add(resolve_amount(effect, context))
 
 static func _draw(effect: AbilityEffect, context: EffectContext) -> void:
 	if context.self_deck == null or context.targets.self_hand == null:
 		push_error("EffectExecutor: DRAW needs self_deck and TargetContext.self_hand")
 		return
-	for i in range(_resolve_amount(effect, context)):
+	for i in range(resolve_amount(effect, context)):
 		var drawn := context.self_deck.draw(context.targets.self_discard_pile)
 		if drawn == null:
 			break
 		context.targets.self_hand.add(drawn)
 
+## Shields reduce incoming DMG by 1 each and are fully removed once dealt any
+## DMG, regardless of source -- this is a general token rule ("any DMG"), not
+## specific to attacks, so it applies here rather than being combat-only.
+## What IS combat-only (Instant Command responses, boost consumption on the
+## attacker) lives in CombatResolver, which computes a final amount and then
+## calls execute() with a plain FIXED effect, still passing through here.
 static func _deal_damage(effect: AbilityEffect, chosen_per_target: Array, context: EffectContext) -> void:
-	var amount := _resolve_amount(effect, context)
+	var amount := resolve_amount(effect, context)
 	for i in range(effect.targets.size()):
 		var target := effect.targets[i]
 		var formation := _formation_for_target(target, context)
@@ -113,7 +125,9 @@ static func _deal_damage(effect: AbilityEffect, chosen_per_target: Array, contex
 			var card := formation.get_card(space_number)
 			if card == null:
 				continue
-			card.current_damage += amount
+			var net_amount := maxi(amount - card.shield_count, 0)
+			card.shield_count = 0
+			card.current_damage += net_amount
 			if card.is_defeated():
 				formation.remove_card(space_number)
 				if removed_pile != null:

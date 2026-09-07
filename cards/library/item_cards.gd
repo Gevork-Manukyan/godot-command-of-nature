@@ -26,34 +26,34 @@ static func all_utilities() -> Array[ItemCardDefinition]:
 # ------------ ATTACKS ------------
 
 static func close_strike() -> ItemAttackCardDefinition:
-	return _make_attack(CardNames.CLOSE_STRIKE, 1, [1], true)
+	return _make_attack(CardNames.CLOSE_STRIKE, 1, [1], true, CardEnums.AttackType.MELEE)
 
 static func far_strike() -> ItemAttackCardDefinition:
-	return _make_attack(CardNames.FAR_STRIKE, 1, [1, 2], true)
+	return _make_attack(CardNames.FAR_STRIKE, 1, [1, 2], true, CardEnums.AttackType.RANGED)
 
 static func distant_double_strike() -> ItemAttackCardDefinition:
-	return _make_attack(CardNames.DISTANT_DOUBLE_STRIKE, 3, [1, 2], false)
+	return _make_attack(CardNames.DISTANT_DOUBLE_STRIKE, 3, [1, 2], false, CardEnums.AttackType.RANGED)
 
 static func farsight_frenzy() -> ItemAttackCardDefinition:
-	return _make_attack(CardNames.FARSIGHT_FRENZY, 3, [1, 2, 3], false)
+	return _make_attack(CardNames.FARSIGHT_FRENZY, 3, [1, 2, 3], false, CardEnums.AttackType.RANGED)
 
 static func focused_fury() -> ItemAttackCardDefinition:
-	return _make_attack(CardNames.FOCUSED_FURY, 2, [1], false)
+	return _make_attack(CardNames.FOCUSED_FURY, 2, [1], false, CardEnums.AttackType.MELEE)
 
 static func magic_ether_strike() -> ItemAttackCardDefinition:
-	return _make_attack(CardNames.MAGIC_ETHER_STRIKE, 5, [1], false)
+	return _make_attack(CardNames.MAGIC_ETHER_STRIKE, 5, [1], false, CardEnums.AttackType.RANGED)
 
 static func natures_wrath() -> ItemAttackCardDefinition:
-	return _make_attack(CardNames.NATURES_WRATH, 2, [1], false)
+	return _make_attack(CardNames.NATURES_WRATH, 2, [1], false, CardEnums.AttackType.MELEE)
 
 static func primitive_strike() -> ItemAttackCardDefinition:
-	return _make_attack(CardNames.PRIMITIVE_STRIKE, 3, [1, 2], false)
+	return _make_attack(CardNames.PRIMITIVE_STRIKE, 3, [1, 2], false, CardEnums.AttackType.RANGED)
 
 static func projectile_blast() -> ItemAttackCardDefinition:
-	return _make_attack(CardNames.PROJECTILE_BLAST, 2, [1, 2], false)
+	return _make_attack(CardNames.PROJECTILE_BLAST, 2, [1, 2], false, CardEnums.AttackType.RANGED)
 
 static func reinforced_impact() -> ItemAttackCardDefinition:
-	return _make_attack(CardNames.REINFORCED_IMPACT, 2, [1], false)
+	return _make_attack(CardNames.REINFORCED_IMPACT, 2, [1], false, CardEnums.AttackType.MELEE)
 
 # ------------ INSTANTS ------------
 
@@ -69,8 +69,15 @@ static func pebble_charm() -> ItemCardDefinition:
 static func twig_charm() -> ItemCardDefinition:
 	return _make_instant(CardNames.TWIG_CHARM, 1, true)
 
+## is_starter=false despite the wiki listing "1 in each faction deck": the
+## rulebook states a Sage pack has exactly 5 Commands, which only adds up
+## (2x Close Strike + 2x Far Strike + 1 faction Charm) without this card.
+## Its own "Deck:" field also categorizes it as Sand & Wind Expansion-
+## primary, unlike the genuinely pack-excluded Melee Shield/Natural Defense/
+## Ranged Barrier, which explicitly say "Command Market". Treated as a
+## regular Command-Market card instead.
 static func natural_restoration() -> ItemCardDefinition:
-	return _make_instant(CardNames.NATURAL_RESTORATION, 1, true)
+	return _make_instant(CardNames.NATURAL_RESTORATION, 1, false)
 
 static func melee_shield() -> ItemCardDefinition:
 	return _make_instant(CardNames.MELEE_SHIELD, 3, false)
@@ -95,12 +102,13 @@ static func exchange_of_nature() -> ItemCardDefinition:
 static func obliterate() -> ItemCardDefinition:
 	return _make_utility(CardNames.OBLITERATE, 5)
 
-static func _make_attack(name: String, price: int, row_requirement: Array[int], is_starter: bool) -> ItemAttackCardDefinition:
+static func _make_attack(name: String, price: int, row_requirement: Array[int], is_starter: bool, attack_type: CardEnums.AttackType) -> ItemAttackCardDefinition:
 	var card := ItemAttackCardDefinition.new()
 	card.card_name = name
 	card.price = price
 	card.is_starter = is_starter
 	card.row_requirement = row_requirement
+	card.attack_type = attack_type
 	return card
 
 static func _make_instant(name: String, price: int, is_starter: bool) -> ItemCardDefinition:

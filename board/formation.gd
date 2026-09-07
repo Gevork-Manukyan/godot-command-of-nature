@@ -127,6 +127,17 @@ func summon(card: CardInstance, space_number: int) -> bool:
 		return false
 	return add_card(card, space_number)
 
+func get_connected_cards(space_number: int) -> Array[CardInstance]:
+	var result: Array[CardInstance] = []
+	var space := get_space(space_number)
+	if space == null:
+		return result
+	for neighbor_number in space.neighbors:
+		var card := get_card(neighbor_number)
+		if card != null:
+			result.append(card)
+	return result
+
 func find_space_of(card: CardInstance) -> int:
 	for space in spaces:
 		if space.card == card:

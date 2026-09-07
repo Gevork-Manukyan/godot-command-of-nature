@@ -452,30 +452,443 @@ cases side by side, proving the fix), move-to-field via a validated
 `get_valid_summon_spaces()` destination, and the combat-modifier stub erroring
 without crashing.
 
+## Combat resolution (2026-09-06)
+
+Built `resolver/combat_resolver.gd`, plus a real fix inside
+`EffectExecutor._deal_damage` discovered while working this out.
+
+**Shield rule was missing entirely, and it's more general than "combat."**
+The rulebook's shield token rule ("each shield reduces incoming DMG by 1...
+after an Elemental with shields on it is dealt *any* DMG, remove all
+shields") applies to *any* source of damage, not just Attack Commands — so it
+belongs in `EffectExecutor._deal_damage` itself (it now reduces the incoming
+amount by `shield_count`, floors at 0, and always clears shields regardless
+of whether the floored damage was 0), not gated behind combat resolution.
+Confirmed against the rulebook's own worked example (3 shields vs. 1 DMG →
+shields clear, 0 DMG taken) and a non-combat direct-damage test (e.g. what
+Frostfall Emperor's ON_ENTER_ROW would do).
+
+**What's actually combat-specific**, in `CombatResolver.resolve_attack(attack_effect,
+chosen_per_target, context, instant_effects=[])`:
+- Computes base attack damage via `EffectExecutor.resolve_amount()` (made
+  public for this — same "one shared function, not two independent
+  re-derivations" principle as `TargetResolver.formation_for` from the
+  effect-execution pass).
+- Applies the defending player's chosen Instant Command responses:
+  `REDUCE_DAMAGE` effects subtract their resolved amount, a `NEGATE_DAMAGE`
+  effect zeroes it outright, floored at 0. Which Instants (if any) got played
+  is the caller's decision, passed in — this class never chooses on the
+  player's behalf, consistent with everywhere else in this codebase.
+  Confirms the rulebook's note that Utility Command damage can't be Instant-
+  reduced: callers just shouldn't route Utility damage through this function.
+- Builds a `.duplicate()`d copy of the attack effect with the final computed
+  amount (as `FIXED`) and hands it to `EffectExecutor.execute()` — so shield
+  reduction, defeat, and removal-to-the-removed-pile all still happen through
+  the one general path, not reimplemented here. `.duplicate()` matters:
+  mutating the original `AbilityEffect` in place would corrupt the shared
+  `CardDefinition` singleton for every future play of that card.
+- Clears the attacker's boosts after the attack, unconditionally — per the
+  rulebook this happens whenever an Elemental attacks, independent of whether
+  damage actually landed (confirmed: still clears after a fully-negated hit).
+
+**Still not handled** (needs trigger detection to know *when* they apply, not
+just what they do): `DONT_REMOVE_BOOST` (e.g. Calamity Leopard's own
+attacker-side ability), `DONT_REMOVE_SHIELD`, `REDIRECT_DAMAGE_TO_SELF`
+(King Crustacean/Terrain Tumbler). `EffectExecutor.execute()` still
+`push_error`s clearly on all 5 combat-only actions if called directly,
+distinguishing "use CombatResolver instead" (REDUCE_DAMAGE/NEGATE_DAMAGE)
+from "needs trigger detection" (the other 3).
+
+**Also fixed while here**: a Godot gotcha, not a logic bug — `var x := max(a, b)`
+triggers a "type inferred from Variant" warning-treated-as-error in this
+project's editor scan, because the global `max()`/`min()` are untyped/
+variadic. Fixed by using the explicitly-typed `maxi()`. Worth remembering if
+a future `:=` assignment from `max()`/`min()` mysteriously fails to load.
+
+Verified end-to-end: the shield-rule fix against a non-combat direct-damage
+case, a full attack with boosted attacker + shielded defender defeating the
+target and relocating it to the removed pile, boosts clearing after
+attacking, a Melee-Shield-style `REDUCE_DAMAGE` instant combining correctly
+with the defender's own shields, a negate-damage instant still clearing
+attacker boosts despite dealing 0, and real card data (Close Strike vs. Melee
+Shield) end-to-end.
+
+## Trigger detection (2026-09-06)
+
+Built the piece that decides *when* a `CardAbility` is currently eligible to
+fire, in `resolver/`, plus one real data gap found and fixed along the way.
+
+**Data gap**: no card had an `attack_type` (melee/ranged) at all, even though
+several triggers (`ON_MELEE_ATTACK`/`ON_RANGED_ATTACK`) depend on knowing it,
+and the wiki had captured it for all 10 Attack cards without it ever being
+stored. Added `CardEnums.AttackType` and an `attack_type` field on
+`ItemAttackCardDefinition`, populated from the original wiki research (Close
+Strike/Focused Fury/Nature's Wrath/Reinforced Impact = melee; the other 6 =
+ranged).
+
+- `resolver/condition_evaluator.gd` — `ConditionEvaluator.evaluate(condition,
+  source_card)`: the first thing to actually check an `AbilityCondition`
+  against anything. Every condition in the library so far is `subject=SELF`
+  checking `BOOST_COUNT`/`SHIELD_COUNT` on the ability's own owner (Vix
+  Vanguard, Granite Rampart) — that's what's implemented; `GOLD`/`HAND_SIZE`
+  need a `GoldPool`/`CardZone` rather than just a card and aren't used by any
+  current card, so they `push_error` rather than guess.
+- `resolver/trigger_detector.gd` — `TriggerDetector`: given a trigger type,
+  finds every currently-eligible `(card, ability)` match across a
+  `Formation` (`find_eligible`), or checks one specific card
+  (`find_eligible_on_card`). "Eligible" = trigger matches, the card is
+  *currently* positioned in one of its allowed rows (the wiki's "Row
+  Required to Use Daybreak/Trigger" applies to both Daybreak and
+  event-triggered abilities alike — this only checks Elemental cards, since
+  Item cards' own "Row Required to Use" is a different, not-yet-built
+  card-play validation), and its condition (if any) passes. Pure detection —
+  doesn't fire anything or decide whether an optional ability gets used.
+  `has_eligible_effect(card, triggers, action, formation)` is the convenience
+  `CombatResolver` needed: "does this card have an eligible ability among
+  these triggers containing an effect with this action."
+- **`CombatResolver.resolve_attack()` updated**: now takes an `attack_type`
+  parameter and uses `TriggerDetector` to check whether the attacker has an
+  eligible `DONT_REMOVE_BOOST` ability among `ON_ATTACK` and whichever of
+  `ON_MELEE_ATTACK`/`ON_RANGED_ATTACK` matches — if so, boosts survive the
+  attack instead of clearing. This is the first of the 5 previously-deferred
+  combat-modifier actions to actually work (Calamity Leopard).
+
+**Still deferred, deliberately**: `DONT_REMOVE_SHIELD` (zero cards use it —
+nothing to wire against) and `REDIRECT_DAMAGE_TO_SELF` (King Crustacean and
+Terrain Tumbler have *different* redirect mechanics — one involves a position
+swap, one doesn't — and both require the player to opt in, which needs its
+own explicit parameter once a caller exists to decide it; detection alone
+isn't the missing piece there).
+
+**Test-writing gotcha worth remembering**: constructing a card via e.g.
+`WarriorCards.slumber_jack()` directly only gives you its *stats* — abilities
+only get attached when going through `CardLibrary.get_all()`/`all()` (see
+`_attach_abilities()`). Hit this firsthand: an early verification pass built
+cards the wrong way and every trigger check silently came back empty. Always
+pull test cards from `CardLibrary.get_all()` for anything ability-related.
+
+Verified: condition evaluation (both branches, null-passes), the new
+`attack_type` data, a `DAYBREAK` scan across three cards correctly excluding
+the one in an ineligible row, a condition-gated trigger (Vix Vanguard
+eligible with a boost, not without), `DONT_REMOVE_BOOST` eligibility
+including the row-eligibility check, and the full `CombatResolver`
+integration side by side — Calamity Leopard keeps its boosts after attacking,
+Acorn Squire (no such ability) still loses them as normal.
+
+## Combat now fires the attacker's other abilities, not just DONT_REMOVE_BOOST (2026-09-06)
+
+`CombatResolver.resolve_attack()` previously only checked for `DONT_REMOVE_BOOST`
+and otherwise ignored the rest of an attacker's on-attack-family abilities
+entirely — Acorn Squire's gold collection, Jade Titan's shield-to-Sage, etc.
+never actually happened. Closed that gap.
+
+**New behavior**: after applying damage, it now finds and fires the
+attacker's eligible abilities on `ON_ATTACK`/whichever of
+`ON_MELEE_ATTACK`/`ON_RANGED_ATTACK` matches `attack_type` (now a required
+parameter), then `ON_DAMAGE_DEALT` (only if some target's `current_damage`
+actually increased — checked via a before/after snapshot, not just "was
+amount > 0 pre-shields", since shields can floor it to nothing), then
+`ON_DEFEAT_ENEMY` once per target this specific attack defeated (matches the
+rulebook's "each time you defeat" leveling language — a multi-defeat attack
+fires it multiple times, though nothing consumes that yet since leveling
+isn't built).
+
+**Ordering matters and was deliberate**: boosts are cleared *before* firing
+these triggers, not after — otherwise an ability that adds a fresh boost
+after dealing damage (Splinter Stinger) would have it immediately stripped
+by this same attack's own clear step. Verified this specifically: Splinter
+Stinger starts with 2 boosts, attacks, ends with exactly 1 (the pre-existing
+2 cleared, then its own ability adds 1 back) — not 3, not 0.
+
+**The "needs a real choice" split**: an ability only auto-fires if every one
+of its effects resolves without ambiguity (`NONE`/`SELF`/`SELF_SAGE`/
+`ENEMY_SAGE`/`ATTACKING_ELEMENTAL` scopes — there's exactly one legal
+answer). Anything with a `ROW`/`FORMATION`/`DISCARD_PILE`/`HAND`-scoped
+effect (Lumber Claw choosing which enemies to hit, Roaming Razor choosing a
+swap partner, Komodo Kin choosing a discard card *and* a destination space)
+gets returned in `resolve_attack()`'s new return value — a list of
+`{card, ability}` entries needing target resolution, same shape as
+`TriggerDetector.find_eligible()` — rather than silently skipped or guessed
+at. `COMBAT_MODIFIER_ACTIONS` (the 5 originally-deferred actions) are
+excluded from "things to auto-fire or defer" entirely, since they're applied
+as modifiers elsewhere in this function, not as standalone effects — this is
+also what stops Calamity Leopard's ability (which is *only* a
+`DONT_REMOVE_BOOST` effect) from being wrongly treated as "nothing to do,
+but let's error about it anyway."
+
+Verified: Acorn Squire's gold collection, Jade Titan's shield-to-its-Sage,
+Splinter Stinger's boost-survives-the-clear ordering, Horned Hollow's
+self-damage-clear firing only after an actual defeat, Calamity Leopard still
+correctly keeping boosts with zero pending/errors, and Lumber Claw + Komodo
+Kin both correctly deferring instead of executing or crashing.
+
+## Market (2026-09-06)
+
+Built `market/market.gd` — the Elemental and Command Markets from Phase III
+(buy/sell/refresh), backed by `Deck`/`GoldPool` from `zones/` as intended
+when those were built.
+
+- `Market.new_elemental_market()` / `Market.new_command_market()` — filter
+  `CardLibrary.all()` by type + `is_starter == false`. This is the payoff of
+  keeping `is_starter` as a real, careful distinction rather than folding it
+  into price: every Sage/Champion is always `is_starter=true`, so filtering
+  the *entire* card pool this way naturally produces exactly "all Elementals/
+  Commands that don't belong to a Sage pack" (the rulebook's own phrasing)
+  with no need to hand-pick which categories to exclude. Verified counts:
+  32 cards for the Elemental market (8 non-starter Basics + 24 non-starter
+  Warriors), 15 for Command (8 non-starter Attacks + 3 non-starter Instants +
+  4 Utilities, which are never part of a Sage pack at all).
+- `buy(index, gold)` / `can_afford(index, gold)` — pay the face-up card's
+  price, remove it, refill from the deck. Returns the bought `CardDefinition`
+  and stops there — what happens next (discard pile, or paying the separate
+  `ELEMENTAL_DIRECT_SUMMON_SURCHARGE` to summon it straight into the
+  formation) is the caller's decision, consistent with everywhere else in
+  this codebase.
+- `refresh(gold)` / `can_refresh(gold)` — moves the current face-up cards to
+  the *bottom* of the deck (not discarded — `Deck.add_cards_to_bottom()`,
+  built during the Hand/Discard/Deck pass specifically for this) and reveals
+  3 new ones for `REFRESH_COST` gold.
+- `Market.sell_value(card)` — `ceil(price / 2)`. The rulebook states this as
+  the general rule, then separately calls out that Sage-pack cards always
+  net exactly 1 gold when sold — those two statements turn out to agree for
+  every `is_starter` card in the library (they're all price 1, and
+  `ceil(1/2) = 1`), so one formula covers both without a special case.
+
+Verified: both markets' total pool sizes and composition (no Sage/Champion/
+starter card ever appears), buying (price deducted, slot refilled, deck
+shrinks), buying without enough gold correctly failing, refresh (net deck
+size unchanged since cards return to the bottom rather than vanishing), and
+sell values for a starter and two different non-starter prices.
+
+## Turn / AP economy (2026-09-06)
+
+Built the piece that ties everything else together into an actual playable
+turn: `player/player_state.gd` + `player/turn.gd`, plus a prerequisite
+refactor (`resolver/ability_firer.gd`) and one real ordering bug caught and
+fixed before it shipped.
+
+**Prerequisite refactor**: `CombatResolver` already had private "fire this
+ability, or defer it if it needs a target choice" logic, and Daybreak
+activation needed the exact same thing. Rather than reimplementing it a
+second time (the same category of mistake as the earlier
+`TargetResolver`/`EffectExecutor` duplication bug), extracted
+`resolver/ability_firer.gd` — `AbilityFirer.fire(ability, context)` — as the
+one shared place that logic lives, refactored `CombatResolver` to call it,
+and re-verified all the existing combat-trigger tests still passed
+identically before building anything new on top. One refinement made while
+extracting it: `fire()` now stops at the *first* effect needing a choice and
+returns it plus everything after it, in order, rather than deferring only
+that one effect — needed for chains like Ruby Guardian's "discard up to 2,
+then add 2 shields for each discarded," where the second effect's amount
+depends on the first one's actual result and can't resolve out of order.
+
+- `player/player_state.gd` — `PlayerState`: bundles one player's Formation,
+  Hand, Deck, Discard/Removed piles, and Gold. Scoped to 2-player
+  deliberately — 4-player team mode shares Formation *and* Gold at the team
+  level (both teammates act on the same ones) while Hand/Deck/Discard/
+  Removed stay individual, which is a different composition than "one
+  bundle per player," not built yet.
+- `player/turn.gd` — `Turn`: phase tracking (`DAYBREAK → ACTIONS → MARKET →
+  CLEANUP` via `advance_phase()`), AP tracking (4 for 2-player), and the
+  rulebook's per-turn limits (each Daybreak ability once, one faction action,
+  each Elemental attacking at most once). A fresh `Turn` per turn, not a
+  reset — the caller starts a new one for whoever goes next.
+  - **Daybreak**: `get_available_daybreak_abilities()` / `use_daybreak_ability()`
+    — thin wrappers around `TriggerDetector` + the new `AbilityFirer`.
+  - **Standard actions**: `draw_card()`, `summon_from_hand()`,
+    `swap_connected()`, `play_command()` (Instant/Utility, via `AbilityFirer`),
+    `play_attack_command()` (validates the attacker is on the formation,
+    hasn't attacked yet this turn, and is in a row the specific Attack Command
+    allows, then delegates to `CombatResolver`).
+  - **Faction actions**: only the AP cost + once-per-turn limit are tracked
+    (`can_use_faction_action()`/`spend_faction_action_ap()`) — what a
+    faction action actually *does* depends on the acting Sage and hasn't
+    been researched yet (see "next options" below).
+  - **Market phase**: `buy_from_market()`, `buy_and_summon_from_market()`
+    (the rulebook's pay-2-more-to-summon-directly option),
+    `sell_from_hand()`, `refresh_market()` — thin wrappers around `Market`.
+  - **Cleanup**: `discard_from_hand()`, `draw_to_hand_size()`,
+    `can_end_cleanup()` (gates ending the turn on hand size ≤ 5).
+
+**Real bug caught before it shipped**: every action method originally spent
+AP *before* validating whether the action was actually legal — so an
+illegal swap (spaces not connected) or an attack from the wrong row would
+still burn the player's AP even though nothing happened. Traced this while
+writing the very first test scenario, before ever running it. Fixed by
+reordering every method to validate fully first and spend AP only once the
+action is guaranteed to succeed — then specifically re-verified with a
+deliberately-illegal swap and a deliberately-illegal repeat-attack, both
+confirmed to leave AP untouched.
+
+Verified with a full simulated turn against real card/market data: Daybreak
+(Cedar collects gold, reusing it correctly rejected), Actions (draw, an
+actual attack via Close Strike that defeats a real target *and*
+auto-fires Acorn Squire's own gold-collecting on-attack ability through the
+now-shared `AbilityFirer`, a legal swap, an illegal swap correctly rejected
+without costing AP, AP exhaustion), Market (buy, sell), and Cleanup (draw
+back up to 5, `can_end_cleanup` gating, a clean `advance_phase()` finish).
+
+## Game setup / initialization (2026-09-06)
+
+Built `player/player_setup.gd` — `PlayerSetup.new_player(sage_name,
+chosen_warrior_names, goes_first)` builds a real starting `PlayerState`
+following the rulebook's setup steps exactly, instead of every prior
+verification hand-building the starting state directly.
+
+**Data correction found while building this**: the rulebook states a Sage
+pack has exactly **5 Command cards**. Checking the wiki's per-card counts —
+Close Strike (2 per faction deck) + Far Strike (2 per faction deck) + 1
+faction-specific Charm = 5, exactly. But `Natural Restoration` was also
+marked `is_starter=true`, and its wiki page *also* claims "1 in each faction
+deck," which would make 6. Natural Restoration's own "Deck:" field
+categorizes it as **Sand & Wind Expansion**-primary (unlike Melee Shield/
+Natural Defense/Ranged Barrier, which explicitly say "Command Market") — so
+its appearance in the 4 base faction decks looks like a later unified-print
+artifact the original rulebook's "5 cards" statement predates. Fixed:
+`is_starter=false`, so it's now a regular Command Market card. This also
+bumped the Command Market's verified pool from 15 to 16 cards (re-confirmed).
+
+**Sage pack composition** (16 cards total, matching the rulebook's own
+count: 1 Sage + 3 Champions + 3 Warriors + 5 Commands + 4 Basics):
+- 1 Sage, 3 Champions (by element) — Champions go to `PlayerState.locked_champions`
+  (face down, inert until leveling exists), not the deck or formation.
+- 3 starter Warriors (by element + `is_starter`) — the rulebook makes
+  choosing 2 of these for the formation the *player's* decision, so
+  `chosen_warrior_names` is a required parameter, not something this class
+  picks. The 3rd goes into the deck.
+- 1 starter Basic (by element + `is_starter`), needed as **4 physical
+  copies** — 3 on the formation (Row I + both Row II slots), 1 into the
+  deck. Multiple "copies" are just the same shared `CardDefinition`
+  reference wrapped in separate `CardInstance`s, same pattern used
+  everywhere else a card can appear more than once.
+- 5 Commands (2× Close Strike, 2× Far Strike, 1 faction Charm) — hardcoded
+  directly rather than derived from `is_starter`, since `is_starter` is a
+  boolean and can't express "2 copies of this one."
+
+Formation layout matches the rulebook's setup diagram and the old
+reference's space numbering exactly: Row I + Row II = the 3 Basic copies,
+Row III = chosen Warrior (space 4, "left") / Sage (space 5, center) /
+chosen Warrior (space 6, "right"). Deck is shuffled, 5 cards drawn to hand.
+Starting gold: 0 if `goes_first`, 3 otherwise (per the rulebook — which
+player actually goes first is left to the caller, same as always).
+
+Verified for two different Sages (Cedar and Torrent) with the full
+resulting formation, locked Champions (correct level thresholds), and the
+complete 7-card deck+hand composition checked card-by-card against what the
+16-card pack math predicts. Also verified an invalid Warrior choice fails
+cleanly (aborts with a clear error, leaves a safely-incomplete state)
+instead of partially applying.
+
+## Leveling + faction actions (2026-09-06)
+
+**Research dead end, then a pivot**: tried to find the 12 per-Sage faction
+actions (3 each, unlocked at level 4/6/8) on unstablegameswiki.com the same
+way the card abilities were sourced. The wiki only has photos of the
+physical Sage boards, and they were too low-resolution and watermarked to
+transcribe reliably — attempted to zoom in via the browser tool, but it
+also started intermittently timing out (`Page.captureScreenshot` timed
+out). Stopped after a few failed attempts rather than guessing at illegible
+numbers, reported the dead end honestly, and the user then typed out all 12
+actions' exact text directly. Lesson: for card-board-photo-only rules
+content, don't burn more than 2-3 attempts on wiki image legibility before
+asking the user to transcribe — same "stop after 2-3 failures" instinct as
+any other blocked tool loop.
+
+**Leveling**: `PlayerState` gained `level` (1-8), `unlocked_faction_action_levels`,
+and `level_up()` — called once per Elemental a player's attack defeats.
+Crossing 4/6/8 unlocks that level's faction action permanently and reveals
+the matching `locked_champions` entry into the discard pile (matched by
+`level_requirement`, not position — order isn't guaranteed). To expose
+defeat counts without duplicating `CombatResolver`'s existing
+before/after-damage snapshot logic, `resolve_attack()`'s return type changed
+from a plain pending-abilities `Array` to `{"pending": Array, "defeated_count":
+int}`; `Turn.play_attack_command()` unpacks it and calls `level_up()` per
+defeat. `Turn` also gained `has_attacked()`/`mark_attacked()` (exposed
+publicly so faction actions that trigger an attack outside the normal
+hand-based flow can still respect "each Elemental attacks at most once per
+turn"), and `can_use_faction_action()`/`spend_faction_action_ap()` now take
+a `level` param, checking `player.unlocked_faction_action_levels.has(level)`
+in addition to the existing AP/once-per-turn gating.
+
+`Formation` gained `get_connected_cards(space_number)` — several faction
+actions ("shield each connected Pebble," "boost per connected Twig")
+needed actual neighbor *cards*, not just neighbor space numbers.
+
+**`player/faction_actions.gd`** — new file, `FactionActions`: 12 static
+functions (`torrent_level_4/6/8`, `gravel_level_4/6/8`, `cedar_level_4/6/8`,
+`porella_level_4/6/8`), one per Sage's per-level action, transcribed
+verbatim from what the user provided. Like `EffectExecutor`/`CombatResolver`,
+these are pure mechanics functions on `EffectContext` — not `Turn` methods —
+so the same "`Turn.can_use_faction_action(level)`/`spend_faction_action_ap(level)`
+first, then call the mechanic" split applies as every other Turn action.
+Notable design points:
+- **Gravel level 6** ("remove all shields, then redistribute in any
+  distribution") is split into `gravel_level_6_collect()` (returns the
+  total removed) and `gravel_level_6_distribute(distribution)` (a
+  space→count `Dictionary`) — the redistribution is the player's choice,
+  not something to guess at in one function.
+- **Porella level 4** ("play an attack command from your discard pile")
+  mirrors `Turn.play_attack_command()`'s row/attacker validation but sources
+  the card from the discard pile and returns it there afterward instead of
+  a second removal. It does **not** check/update attacked-this-turn itself —
+  `FactionActions` has no access to `Turn`'s tracking, so the caller is
+  expected to check `Turn.has_attacked()`/call `Turn.mark_attacked()`
+  around it, same as it already checks `can_use_faction_action()` first.
+- All three "deal fixed damage" actions (Torrent/Gravel/Cedar level 8) route
+  through one shared `_deal_fixed_damage()` helper that builds a throwaway
+  `DEAL_DAMAGE` effect and runs it through `EffectExecutor.execute()`, so
+  shield reduction, defeat, and removed-pile handling all go through the
+  one general path instead of being reimplemented three times.
+
+Verified with a temporary headless script covering all 12 functions plus
+leveling/unlock progression 1→8 and the `Turn` gating checks. Two real
+test-setup bugs were caught and fixed along the way (not `FactionActions`
+bugs): a card placed at an already-occupied formation space silently didn't
+overwrite what was there, so the "wrong" card ended up under test; and a
+defeated-and-removed card was reused in a later sub-test without being
+re-added to the formation, so damage dealt "to" its old space hit nothing.
+Both are reminders that shared formation state across sequential test
+sections needs each section to account for what earlier sections did to it.
+Deleted the temporary script after all values matched expected output.
+
 ## Not done yet / explicitly deferred
 - **The ~50 extra cards found on the wiki** (new Warriors like Aqua Acrobat/
   Cobra King/Rock Buck, new Attacks/Instants, and a whole new "Ritual Command"
   card type) — user explicitly chose to scope this pass to the existing 86
   only. Revisit as its own decision if/when expanding the roster.
-- **Combat resolution** — the 5 actions that modify an in-progress attack
-  (`REDUCE_DAMAGE`, `NEGATE_DAMAGE`, `DONT_REMOVE_BOOST`, `DONT_REMOVE_SHIELD`,
-  `REDIRECT_DAMAGE_TO_SELF`) need an actual attack-sequencing system (base
-  damage → +boosts → −shields → −Instant reductions → apply) that doesn't
-  exist yet. `EffectExecutor` explicitly errors on these rather than
-  pretending to handle them. See "Known modeling gaps" further up for the
-  other unresolved nuances (conditional bonuses, "choose A or B" effects,
-  contextual targets) this will also need to confront.
-- **Trigger detection** — nothing decides *when* a `CardAbility` should fire
-  (event wiring for things like "when this Elemental attacks" or "when an
-  ally enters your formation"). Also part of the resolver, not started.
-- **Market** (Elemental/Command decks with 3 face-up slots, buy/sell/refresh)
-  — `Deck`/`CardZone` in `zones/` are built to support it, but the Market
-  wrapper itself (face-up display, gold spending) doesn't exist yet.
-- AP economy/turn phases, leveling, tokens as physical UI elements (vs. the
-  plain `int` counters already on `CardInstance`) — none implemented yet.
+- **2 of the 5 combat-modifier actions**: `DONT_REMOVE_SHIELD` (zero cards
+  use it) and `REDIRECT_DAMAGE_TO_SELF` (King Crustacean/Terrain Tumbler —
+  needs a player-opt-in parameter and per-card handling of the
+  position-swap nuance, not just detection). `DONT_REMOVE_BOOST` and both
+  Instant Command actions (`REDUCE_DAMAGE`/`NEGATE_DAMAGE`) are done.
+- **Event wiring for the other 10 `AbilityTrigger`s** not touched by combat
+  (`ON_ALLY_ENTER_FORMATION`, `ON_SHIELD_ADDED`/`ON_SHIELD_REMOVED`,
+  `ON_ENTER_ROW`, `ON_ALLY_LEAVE_FORMATION`, `ON_DEFEATED`,
+  `ON_ATTACKED`/`ON_MELEE_ATTACKED`/`ON_RANGED_ATTACKED` — for surfacing
+  which Instants are eligible to play in response — and
+  `ON_DAMAGE_ABOUT_TO_BE_DEALT_TO_ALLY`). `TriggerDetector` works generically
+  for all of them; what's missing is a higher-level game-flow loop to call
+  `find_eligible()` at the right moments (after every Formation mutation) —
+  that loop doesn't exist yet, same as the turn/AP economy below. Combat
+  itself now fires everything it can find on the attacker (`ON_ATTACK`/
+  `ON_MELEE_ATTACK`/`ON_RANGED_ATTACK`/`ON_DAMAGE_DEALT`/`ON_DEFEAT_ENEMY`),
+  returning anything needing a fresh target choice rather than executing or
+  dropping it silently.
+- **4-player setup and faction actions** — `PlayerSetup`/`Turn` only
+  build/track the 2-player case. 4-player setup also needs to place a second
+  player's Sage pack onto a *shared* 12-space formation
+  (`Team.initWarriors2Decks`-style — matching same-element choices to the
+  correct half) and share one gold pool at the team level, which needs the
+  different Team-level composition flagged on `PlayerState`. **Leveling is
+  confirmed per-player, not per-team** (per the rulebook — user confirmed
+  2026-09-06), so `PlayerState.level`/`unlocked_faction_action_levels` as
+  built already have the right scope for 4-player too; only
+  Formation/GoldPool need to move to a shared Team-level object.
+- Tokens as physical/visual game elements (vs. the plain `int` counters
+  already on `CardInstance`) — not relevant until there's a UI.
 - Old prototype's `game.gd`/`card.gd` not yet connected to any of the new
-  `cards/`/`board/`/`zones/`/`resolver/` systems — still the original
-  standard-deck 2-card-hand demo.
+  `cards/`/`board/`/`zones/`/`resolver/`/`market/`/`player/` systems — still
+  the original standard-deck 2-card-hand demo.
 - 4-player/team rules — the data model stays ready for them (`Formation`
   supports both sizes, `TargetContext` has enemy-side hand/discard fields),
   but no actual 4-player game flow exists. Confirmed with the user: a
