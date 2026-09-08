@@ -52,11 +52,20 @@ var ap_remaining: int
 var used_daybreak_cards: Array[CardInstance] = []
 var used_faction_action: bool = false
 var attacked_this_turn: Array[CardInstance] = []
+## Each formation card's row at the moment this Turn started (i.e. Phase I),
+## keyed by CardInstance -- Daybreak eligibility is locked in at turn start
+## per the rulebook, so a Daybreak effect that shifts cards between rows
+## (River Rogue, Whirl Whipper) mid-phase must not change which *other*
+## cards' Daybreak abilities are still usable. See get_available_daybreak_abilities().
+var _daybreak_row_snapshot: Dictionary = {}
 
 func _init(p_players: Array[PlayerState], p_opponents: Array[PlayerState]):
 	players = p_players
 	opponents = p_opponents
 	ap_remaining = MAX_AP_2_PLAYER if players.size() == 1 else MAX_AP_4_PLAYER
+	for space in _formation().spaces:
+		if space.card != null:
+			_daybreak_row_snapshot[space.card] = space.row
 
 func advance_phase() -> bool:
 	match phase:
@@ -82,9 +91,14 @@ func get_available_daybreak_abilities() -> Array:
 	if phase != Phase.DAYBREAK:
 		return []
 	var available := []
-	for entry in TriggerDetector.find_eligible(CardEnums.AbilityTrigger.DAYBREAK, _formation()):
-		if not used_daybreak_cards.has(entry["card"]):
-			available.append(entry)
+	for space in _formation().spaces:
+		var card := space.card
+		if card == null or used_daybreak_cards.has(card):
+			continue
+		var start_row: int = _daybreak_row_snapshot.get(card, space.row)
+		var ability := TriggerDetector.find_eligible_at_row(card, CardEnums.AbilityTrigger.DAYBREAK, start_row)
+		if ability != null:
+			available.append({"card": card, "ability": ability})
 	return available
 
 ## Returns whatever AbilityFirer couldn't resolve on its own (see
@@ -96,7 +110,8 @@ func use_daybreak_ability(card: CardInstance, ability: CardAbility, context: Eff
 	if used_daybreak_cards.has(card):
 		push_error("Turn: %s already used its Daybreak ability this turn" % card.definition.card_name)
 		return []
-	if TriggerDetector.find_eligible_on_card(card, CardEnums.AbilityTrigger.DAYBREAK, _formation()) != ability:
+	var start_row: int = _daybreak_row_snapshot.get(card, -1)
+	if start_row == -1 or TriggerDetector.find_eligible_at_row(card, CardEnums.AbilityTrigger.DAYBREAK, start_row) != ability:
 		push_error("Turn: that ability isn't currently eligible")
 		return []
 	used_daybreak_cards.append(card)

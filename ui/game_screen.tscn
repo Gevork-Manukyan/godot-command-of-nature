@@ -100,6 +100,11 @@ unique_name_in_owner = true
 layout_mode = 2
 text = "Refresh Command Market"
 
+[node name="FactionActionRow" type="HBoxContainer" parent="Scroll/Margin/Layout"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 10
+
 [node name="BottomRow" type="HBoxContainer" parent="Scroll/Margin/Layout"]
 layout_mode = 2
 theme_override_constants/separation = 20
@@ -123,6 +128,13 @@ text = "Swap"
 unique_name_in_owner = true
 layout_mode = 2
 text = "Advance Phase"
+
+[node name="FactionAmountSpinBox" type="SpinBox" parent="Scroll/Margin/Layout/BottomRow"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+min_value = 1
+max_value = 1
 
 [node name="ConfirmButton" type="Button" parent="Scroll/Margin/Layout/BottomRow"]
 unique_name_in_owner = true

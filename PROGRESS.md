@@ -1674,6 +1674,86 @@ only reachable once a formation space actually opens up (a card defeated,
 or the not-yet-built shift-forward flow) — the test freed a space manually
 to exercise it, same as a real game would need a defeat to happen first.
 
+## Wired up Daybreak and faction actions (2026-09-07)
+
+Two whole turn phases had no UI at all until now: Phase I (Daybreak) was
+skipped once at match start with no way for any *later* turn to leave it,
+and faction actions were never exposed even though `player/faction_actions.gd`
+already had all 12 Sages' mechanics implemented from an earlier session.
+
+**Real, previously-undiscovered bug found and fixed first**: `PlayerSetup`
+built every Sage/Warrior/Champion for a starting formation by calling
+`SageCards.all()`/`WarriorCards.by_element()`/`ChampionCards.by_element()`
+directly, bypassing `CardLibrary.all()` — the only place abilities actually
+get attached (`CardLibrary._attach_abilities()`). That meant every card
+placed on a starting formation had a permanently empty `.ability` array —
+Daybreak, on-attack, everything — while anything bought later from a Market
+(which does route through `CardLibrary.all()`) worked fine. This was
+completely invisible before now because Daybreak itself was never reachable
+in the UI. Fixed by re-mapping each selected Sage/Warrior/Champion to its
+`CardLibrary`-sourced (ability-attached) counterpart by name inside
+`PlayerSetup._setup_player()`/`_find_sage()`, without touching the
+selection/filtering logic itself.
+
+**Daybreak**: found a second real gap while researching — eligibility was
+checked against the *live* formation on every call
+(`get_available_daybreak_abilities()`/`use_daybreak_ability()` via
+`TriggerDetector`), not a snapshot from turn start. Two real cards (River
+Rogue, Whirl Whipper) move Elementals between rows as their own Daybreak
+effect, which could incorrectly show/hide *other* cards' Daybreak
+eligibility mid-phase. Fixed with `Turn._daybreak_row_snapshot` (populated
+once in `_init()`, since `phase` always starts at `DAYBREAK`) and a new
+`TriggerDetector.find_eligible_at_row()` that checks a given row instead of
+deriving it live — `find_eligible()`/`find_eligible_on_card()` are
+untouched, since every other trigger correctly wants live position.
+Verified with a hand-built formation (River Rogue swapping a shielded
+Granite Rampart out of Row II and an Onyx Bearer into it): Granite Rampart
+stayed eligible after moving out, Onyx Bearer stayed ineligible after moving
+in — both directions of the fix confirmed.
+
+With that fixed, `GameScreen` highlights every self-formation space with a
+currently-eligible, unused Daybreak ability (no new `InteractionState` —
+it's a per-phase overlay on `IDLE`, since nothing else is selectable during
+Daybreak); clicking one fires it through `Turn.use_daybreak_ability()` and
+feeds any leftover targets straight into the *same* `_start_command_targeting()`
+sequencer Utility Commands already use. `_ready()`'s one-time auto-skip past
+Daybreak is gone — turn 1 behaves like every other turn. Hand-card clicks
+during Daybreak now say so explicitly instead of silently failing deep
+inside `Turn._spend_ap()`'s phase check.
+
+**Faction actions (Cedar + Gravel only — Torrent/Porella deferred, they need
+discard-pile browsing UI that doesn't exist yet)**: unlike card abilities,
+`FactionActions`'s 12 functions are bespoke (numeric amounts, an arbitrary
+multi-space distribution) and don't produce `AbilityEffect`/`AbilityTarget`
+arrays, so none of the existing sequencer applies. Added 5 new named
+`InteractionState`s and a dynamically-rebuilt `FactionActionRow` (one Button
+per currently-unlocked-and-usable level) plus a `FactionAmountSpinBox` +
+the existing `ConfirmButton` for the two actions needing a numeric spend
+(1-3 boosts, 1-2 shields):
+- **Cedar L4**/**Gravel L4**: no target, one-shot on click.
+- **Cedar L6**: click a self Elemental to boost (amount = connected Twig count).
+- **Cedar L8**/**Gravel L8**: source (Cedar only — Gravel's is always its
+  Sage) → amount via SpinBox+Confirm → enemy target → damage.
+- **Gravel L6**: the one genuinely irreversible-from-the-first-click action —
+  `collect()` zeroes every shield on the board before any are placed back, so
+  AP is spent and `collect()` runs immediately, before any UI appears; then a
+  repeat-until-done loop (pick a self space → amount → repeat) accumulates a
+  distribution and only calls `distribute()`/refreshes once every shield's
+  placed. A mis-click during this specific loop is a no-op, not the usual
+  cancel-back-to-IDLE, since the shields are already off the board and
+  abandoning would strand them.
+
+AP is spent at the point each action becomes irreversible, not on the first
+click, matching `faction_actions.gd`'s own stated contract.
+
+Verified headlessly (all 6 flows, both sides, across a real turn hand-off via
+`Match.finish_turn()`, including a multi-chunk Gravel L6 distribute and both
+insufficient-resource rejections) and via real synthetic clicks
+(`Viewport.push_input(event, true)`) driving one full Daybreak ability and
+the entire Cedar L8 source→amount→Confirm→enemy-target chain end-to-end —
+the lesson from the Market `.bind()` bug was to exercise the actual signal
+path, not call handlers directly.
+
 ## Not done yet / explicitly deferred
 - **Shift-forward-on-defeat.** When a card is defeated, `Formation.remove_card()`
   correctly just clears that space rather than auto-compacting (see the
@@ -1725,12 +1805,12 @@ to exercise it, same as a real game would need a defeat to happen first.
   repo's `GameState`'s JOINING_GAME/SAGE_SELECTION/WARRIOR_SELECTION phases
   have no equivalent here) — not needed until there's a UI to drive it.
 - **The rest of the interactive game screen** — draw/summon/single-target
-  Attack Command/swap/Utility Commands/Market/turn hand-off/win condition
-  all work now, but still not wired up: faction actions, Daybreak
-  abilities, multi-target Attack Commands, Utility Commands needing a
-  `HAND`/`DISCARD_PILE` target (Elemental Incantation), and "buy and
-  summon directly" at the Market — all reuse the same click-to-select/
-  click-to-target/refresh primitives already built, so each is a fast
+  Attack Command/swap/Utility Commands/Market/turn hand-off/win
+  condition/Daybreak/faction actions (Cedar+Gravel) all work now, but still
+  not wired up: Torrent's and Porella's faction actions (need discard-pile
+  browsing UI that doesn't exist yet), multi-target Attack Commands, and
+  Utility Commands needing a `HAND`/`DISCARD_PILE` target (Elemental
+  Incantation) — all reuse patterns already built, so each is a fast
   follow-up, not a redesign. Also still no Sage/Warrior setup-picker screen
   (the dev `Match` is hardcoded) and no 4-player screen support (the
   interaction code assumes `players[0]`/a single hand; extending to a

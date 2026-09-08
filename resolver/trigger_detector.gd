@@ -36,6 +36,15 @@ static func find_eligible_on_card(card: CardInstance, trigger: CardEnums.Ability
 	if space_number == -1:
 		return null
 	var row := formation.get_space(space_number).row
+	return find_eligible_at_row(card, trigger, row)
+
+## Same eligibility check as find_eligible_on_card(), but for a row given
+## directly instead of derived from the card's current position -- Daybreak
+## eligibility is locked in at the start of Phase I (see Turn's
+## _daybreak_row_snapshot), so it needs to check the row a card started the
+## phase in, not wherever it's moved to since (e.g. River Rogue/Whirl
+## Whipper both shift Elementals between rows as their own Daybreak effect).
+static func find_eligible_at_row(card: CardInstance, trigger: CardEnums.AbilityTrigger, row: int) -> CardAbility:
 	for ability in _abilities_of(card):
 		if ability.trigger == trigger and _row_eligible(card, row) and ConditionEvaluator.evaluate(ability.condition, card):
 			return ability

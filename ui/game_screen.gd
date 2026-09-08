@@ -28,9 +28,15 @@ extends Control
 ## to the player (same "never auto-pick a player's choice" principle as
 ## everywhere else in this project).
 ##
-## Still not wired up: faction actions and Daybreak abilities -- they'd
-## reuse the exact same click-to-select/click-to-target/refresh pattern
-## built in this file, so they're fast follow-ups, not a redesign.
+## Phase.DAYBREAK is fully playable too: eligible Elementals (per
+## Turn.get_available_daybreak_abilities()) highlight on the self board;
+## clicking one fires it through Turn.use_daybreak_ability() and feeds any
+## leftover targets into the same _start_command_targeting() sequencer
+## Utility Commands use. Faction actions are wired up for Cedar and Gravel
+## only (the two Sages in this dev Match) -- see the "Faction actions"
+## section below; Torrent's and Porella's remaining 6 actions need
+## discard-pile browsing UI that doesn't exist yet.
+##
 ## Multi-target Attack Commands aren't handled (only the first target's
 ## candidates are offered) -- fine for the single-target Attack Commands
 ## this slice exercises. Utility Commands needing a HAND/DISCARD_PILE
@@ -46,6 +52,8 @@ enum InteractionState {
 	IDLE, SUMMON_SELECT_SPACE, ATTACK_SELECT_ATTACKER, ATTACK_SELECT_TARGET,
 	SWAP_SELECT_FIRST, SWAP_SELECT_SECOND, COMMAND_SELECT_TARGET,
 	MARKET_SUMMON_SELECT_SPACE,
+	FACTION_SELECT_TARGET, FACTION_SELECT_SOURCE, FACTION_SELECT_AMOUNT,
+	FACTION_SELECT_ENEMY_TARGET, FACTION_GRAVEL6_PICK_SPACE,
 }
 
 @onready var status_label: Label = %StatusLabel
@@ -63,6 +71,8 @@ enum InteractionState {
 @onready var elemental_market_refresh_button: Button = %ElementalMarketRefreshButton
 @onready var command_market_refresh_button: Button = %CommandMarketRefreshButton
 @onready var direct_summon_toggle: CheckButton = %DirectSummonToggle
+@onready var faction_action_row: HBoxContainer = %FactionActionRow
+@onready var faction_amount_spin_box: SpinBox = %FactionAmountSpinBox
 
 var current_match: Match
 var elemental_market: Market
@@ -86,6 +96,23 @@ var pending_target_index: int = 0
 ## Array[int] per target -- passed to EffectExecutor.execute() as
 ## chosen_per_target once every target has enough picks.
 var pending_chosen: Array = []
+## Self-formation space_number -> {"card":CardInstance,"ability":CardAbility}
+## for every currently-eligible-and-unused Daybreak ability, recomputed each
+## _refresh_all() call while turn.phase == Phase.DAYBREAK -- read by
+## _on_daybreak_space_pressed() when the player actually clicks one.
+var daybreak_eligible: Dictionary = {}
+## Which faction-action flow is in progress ("cedar6"/"cedar8"/"gravel8"/
+## "gravel6") -- read by _on_faction_amount_confirmed() and the enemy-target
+## click handler to know which FactionActions function to call, since they
+## share the FACTION_SELECT_AMOUNT/FACTION_SELECT_ENEMY_TARGET states.
+var pending_faction_kind: String = ""
+var pending_faction_source_space: int = -1
+var pending_faction_amount: int = -1
+## Gravel L6 only: shields already assigned per space (space_number -> count,
+## accumulating across repeat visits to the same space) and how many are
+## still unplaced -- see _start_gravel_level_6().
+var gravel_distribution: Dictionary = {}
+var gravel_shields_remaining: int = 0
 
 func _ready() -> void:
 	# Row III at top for the opponent, Row I at bottom -- so both sides'
@@ -97,7 +124,6 @@ func _ready() -> void:
 		[PlayerSetup.new_player(CardNames.CEDAR, [CardNames.ACORN_SQUIRE, CardNames.QUILL_THORNBACK], true)],
 		[PlayerSetup.new_player(CardNames.GRAVEL, [CardNames.GEO_WEASEL, CardNames.GRANITE_RAMPART], false)],
 		0)
-	current_match.current_turn.advance_phase()  # DAYBREAK -> ACTIONS (no Daybreak UI this round)
 	elemental_market = Market.new_elemental_market()
 	command_market = Market.new_command_market()
 
@@ -164,9 +190,220 @@ func _refresh_all() -> void:
 	elemental_market_refresh_button.disabled = over
 	command_market_refresh_button.disabled = over
 	direct_summon_toggle.disabled = over
+	_refresh_faction_action_buttons(over)
 	_clear_selection()
+	if turn.phase == Turn.Phase.DAYBREAK and not over:
+		_refresh_daybreak_highlights()
 	if over:
 		status_label.text = "Match over! Side %d wins." % current_match.winner()
+
+## Highlights every self-formation space with a currently-eligible, unused
+## Daybreak ability and rebuilds daybreak_eligible for the click handler.
+## Called after _clear_selection() specifically -- that clears every
+## highlight/status text unconditionally, and this is the per-phase overlay
+## on top of it. No dedicated InteractionState: nothing else is selectable
+## while Phase.DAYBREAK is up, so "browsing" is just IDLE + this highlight.
+func _refresh_daybreak_highlights() -> void:
+	var turn := current_match.current_turn
+	daybreak_eligible = {}
+	var spaces: Array[int] = []
+	for entry in turn.get_available_daybreak_abilities():
+		var card: CardInstance = entry["card"]
+		var space_number := turn.players[0].formation.find_space_of(card)
+		if space_number != -1:
+			daybreak_eligible[space_number] = entry
+			spaces.append(space_number)
+	self_formation_display.highlight_spaces(spaces)
+	if spaces.is_empty():
+		status_label.text = "No Daybreak abilities available -- Advance Phase to continue."
+	else:
+		status_label.text = "Choose a highlighted Elemental to use its Daybreak ability, or Advance Phase to skip the rest."
+
+## --- Faction actions (Cedar + Gravel only -- see class doc) ---------------
+## FactionActions (player/faction_actions.gd) has all 12 Sages' mechanics
+## fully implemented as plain functions with bespoke signatures -- unlike
+## card abilities, they don't produce AbilityEffect/AbilityTarget arrays, so
+## none of the existing TargetResolver-driven sequencer applies. Each of the
+## 6 flows below is purpose-built to its own action's shape instead.
+
+## One Button per currently-unlocked-and-usable faction-action level for the
+## acting player's Sage -- empty whenever Turn.can_use_faction_action(level)
+## is false for every unlocked level (wrong phase, already used this turn,
+## etc.), so no separate .disabled bookkeeping is needed on top of this.
+func _refresh_faction_action_buttons(over: bool) -> void:
+	for child in faction_action_row.get_children():
+		faction_action_row.remove_child(child)
+		child.queue_free()
+	if over:
+		return
+	var turn := current_match.current_turn
+	var acting: PlayerState = turn.players[0]
+	if acting.sage == null:
+		return
+	var sage_name: String = acting.sage.definition.card_name
+	for level in acting.unlocked_faction_action_levels:
+		if not turn.can_use_faction_action(level):
+			continue
+		var label := _faction_action_label(sage_name, level)
+		if label == "":
+			continue  # a Sage/level this demo slice doesn't support yet
+		var button := Button.new()
+		button.text = label
+		button.pressed.connect(_on_faction_button_pressed.bind(sage_name, level))
+		faction_action_row.add_child(button)
+
+func _faction_action_label(sage_name: String, level: int) -> String:
+	var labels := {
+		CardNames.CEDAR: {4: "Faction: +2 Boost (Row I)", 6: "Faction: Boost by Twig count", 8: "Faction: Spend Boosts -> Damage"},
+		CardNames.GRAVEL: {4: "Faction: +1 Shield (Sage-connected Pebbles)", 6: "Faction: Redistribute Shields", 8: "Faction: Spend Sage Shields -> Damage"},
+	}
+	return labels.get(sage_name, {}).get(level, "")
+
+func _on_faction_button_pressed(sage_name: String, level: int) -> void:
+	if state != InteractionState.IDLE or current_match.is_over():
+		return
+	if sage_name == CardNames.CEDAR:
+		match level:
+			4: _start_cedar_level_4()
+			6: _start_cedar_level_6()
+			8: _start_cedar_level_8()
+	elif sage_name == CardNames.GRAVEL:
+		match level:
+			4: _start_gravel_level_4()
+			6: _start_gravel_level_6()
+			8: _start_gravel_level_8()
+
+## --- Cedar ---
+
+func _start_cedar_level_4() -> void:
+	var turn := current_match.current_turn
+	if not turn.spend_faction_action_ap(4):
+		status_label.text = "Can't use that faction action right now."
+		return
+	FactionActions.cedar_level_4(_build_context())
+	_refresh_all()
+	status_label.text = "Used Cedar's faction action: +2 boosts to your Row I Elemental."
+
+func _start_cedar_level_6() -> void:
+	var occupied := _occupied_spaces(current_match.current_turn.players[0].formation)
+	if occupied.is_empty():
+		status_label.text = "No Elemental on your board to boost."
+		return
+	pending_faction_kind = "cedar6"
+	state = InteractionState.FACTION_SELECT_TARGET
+	self_formation_display.highlight_spaces(occupied)
+	status_label.text = "Choose an Elemental to boost (+1 per connected Twig Elemental)."
+
+func _start_cedar_level_8() -> void:
+	var boosted := _boosted_spaces(current_match.current_turn.players[0].formation)
+	if boosted.is_empty():
+		status_label.text = "No boosted Elemental to spend from right now."
+		return
+	pending_faction_kind = "cedar8"
+	state = InteractionState.FACTION_SELECT_SOURCE
+	self_formation_display.highlight_spaces(boosted)
+	status_label.text = "Choose a boosted Elemental to spend boosts from."
+
+## --- Gravel ---
+
+func _start_gravel_level_4() -> void:
+	var turn := current_match.current_turn
+	if not turn.spend_faction_action_ap(4):
+		status_label.text = "Can't use that faction action right now."
+		return
+	FactionActions.gravel_level_4(_build_context())
+	_refresh_all()
+	status_label.text = "Used Gravel's faction action: +1 shield to each Pebble Elemental connected to your Sage."
+
+## Irreversible from the first click -- collect() zeroes every shield on the
+## board before any of them are placed back, so (unlike every other faction
+## action here) AP is spent and collect() runs immediately, before any
+## targeting UI appears. No _refresh_all() call yet either: that would call
+## _clear_selection() and wipe the very pending_faction_kind/gravel_* state
+## this function is about to set up (see the Utility Command sequencer's
+## identical discipline of not refreshing until every pending step resolves).
+func _start_gravel_level_6() -> void:
+	var turn := current_match.current_turn
+	if not turn.spend_faction_action_ap(6):
+		status_label.text = "Can't use that faction action right now."
+		return
+	var total: int = FactionActions.gravel_level_6_collect(_build_context())
+	if total == 0:
+		_refresh_all()
+		status_label.text = "No shields to redistribute."
+		return
+	pending_faction_kind = "gravel6"
+	gravel_distribution = {}
+	gravel_shields_remaining = total
+	_begin_gravel_distribute_pick_space()
+
+func _begin_gravel_distribute_pick_space() -> void:
+	if gravel_shields_remaining <= 0:
+		_finish_gravel_distribute()
+		return
+	var occupied := _occupied_spaces(current_match.current_turn.players[0].formation)
+	state = InteractionState.FACTION_GRAVEL6_PICK_SPACE
+	self_formation_display.highlight_spaces(occupied)
+	status_label.text = "Choose a space for some of the %d shield(s) to redistribute." % gravel_shields_remaining
+
+func _finish_gravel_distribute() -> void:
+	FactionActions.gravel_level_6_distribute(_build_context(), gravel_distribution)
+	_refresh_all()
+	status_label.text = "Redistributed shields."
+
+func _start_gravel_level_8() -> void:
+	var sage := current_match.current_turn.players[0].sage
+	if sage == null or sage.shield_count < 1:
+		status_label.text = "Your Sage has no shields to spend."
+		return
+	pending_faction_kind = "gravel8"
+	state = InteractionState.FACTION_SELECT_AMOUNT
+	_show_amount_spin_box(mini(2, sage.shield_count))
+	status_label.text = "How many of your Sage's shields (1-%d) to spend?" % faction_amount_spin_box.max_value
+
+## --- shared helpers ---
+
+func _occupied_spaces(formation: Formation) -> Array[int]:
+	var result: Array[int] = []
+	for space in formation.spaces:
+		if space.card != null:
+			result.append(space.space_number)
+	return result
+
+func _boosted_spaces(formation: Formation) -> Array[int]:
+	var result: Array[int] = []
+	for space in formation.spaces:
+		if space.card != null and space.card.boost_count > 0:
+			result.append(space.space_number)
+	return result
+
+func _show_amount_spin_box(max_value: int) -> void:
+	faction_amount_spin_box.min_value = 1
+	faction_amount_spin_box.max_value = max_value
+	faction_amount_spin_box.value = 1
+	faction_amount_spin_box.visible = true
+	confirm_button.visible = true
+
+## FACTION_SELECT_AMOUNT board clicks are always a no-op regardless of which
+## flow is active -- the SpinBox + Confirm is the only valid input while
+## it's showing, so there's nothing on the board to "mis-click" into.
+func _on_faction_amount_confirmed() -> void:
+	var amount := int(faction_amount_spin_box.value)
+	faction_amount_spin_box.visible = false
+	confirm_button.visible = false
+	match pending_faction_kind:
+		"gravel6":
+			var space := pending_faction_source_space
+			gravel_distribution[space] = gravel_distribution.get(space, 0) + amount
+			gravel_shields_remaining -= amount
+			_begin_gravel_distribute_pick_space()
+		"cedar8", "gravel8":
+			pending_faction_amount = amount
+			state = InteractionState.FACTION_SELECT_ENEMY_TARGET
+			var enemy_occupied := _occupied_spaces(current_match.current_turn.opponents[0].formation)
+			enemy_formation_display.highlight_spaces(enemy_occupied)
+			self_formation_display.clear_highlight()
+			status_label.text = "Choose an enemy Elemental to damage."
 
 ## Resets interaction state/highlights without touching the displays'
 ## underlying data -- used both after a successful action (via
@@ -183,19 +420,34 @@ func _clear_selection() -> void:
 	pending_effects = []
 	pending_target_index = 0
 	pending_chosen = []
+	pending_faction_kind = ""
+	pending_faction_source_space = -1
+	pending_faction_amount = -1
+	gravel_distribution = {}
+	gravel_shields_remaining = 0
 	confirm_button.visible = false
+	faction_amount_spin_box.visible = false
 	self_formation_display.clear_highlight()
 	enemy_formation_display.clear_highlight()
-	if current_match != null and current_match.current_turn.phase == Turn.Phase.MARKET:
-		status_label.text = "Click a hand card to sell it, or a Market card to buy it."
-	else:
-		status_label.text = "Click a hand card to play it, or Swap two connected Elementals."
+	if current_match == null:
+		return
+	match current_match.current_turn.phase:
+		Turn.Phase.MARKET:
+			status_label.text = "Click a hand card to sell it, or a Market card to buy it."
+		Turn.Phase.DAYBREAK:
+			pass  # overridden right after by _refresh_daybreak_highlights() (see _refresh_all())
+		_:
+			status_label.text = "Click a hand card to play it, or Swap two connected Elementals."
 
 func _on_hand_card_pressed(display: CardDisplay, hand_index: int) -> void:
 	if state != InteractionState.IDLE or current_match.is_over():
 		return
 	var turn := current_match.current_turn
 	var definition := turn.players[0].hand.get_all()[hand_index]
+
+	if turn.phase == Turn.Phase.DAYBREAK:
+		status_label.text = "It's the Daybreak phase -- choose a highlighted Elemental on your board to use its ability, or Advance Phase to move on."
+		return
 
 	if turn.phase == Turn.Phase.MARKET:
 		var value := Market.sell_value(definition)
@@ -279,6 +531,23 @@ func _row_requirement_text(attack_def: ItemAttackCardDefinition) -> String:
 ## doesn't have yet; those commands say so explicitly instead of silently
 ## breaking.
 
+## Entry point for Phase.DAYBREAK's "click a highlighted Elemental to use
+## its ability" flow (see _on_self_space_pressed()). A click on a space
+## daybreak_eligible doesn't recognize is a no-op, not a cancel -- there's no
+## in-progress selection to abandon while just browsing, unlike every other
+## flow's mis-click convention.
+func _on_daybreak_space_pressed(space_number: int) -> void:
+	if not daybreak_eligible.has(space_number):
+		return
+	var entry = daybreak_eligible[space_number]
+	var card: CardInstance = entry["card"]
+	var ability: CardAbility = entry["ability"]
+	var context := _build_context()
+	var pending := current_match.current_turn.use_daybreak_ability(card, ability, context)
+	var effects: Array[AbilityEffect] = []
+	effects.assign(pending)
+	_start_command_targeting(effects, "%s's Daybreak ability" % card.definition.card_name)
+
 func _start_command_targeting(effects: Array[AbilityEffect], command_name: String) -> void:
 	pending_effects = effects
 	if pending_effects.is_empty():
@@ -355,9 +624,10 @@ func _advance_pending_target() -> void:
 		_begin_pending_effect()
 
 func _on_confirm_pressed() -> void:
-	if state != InteractionState.COMMAND_SELECT_TARGET:
-		return
-	_advance_pending_target()
+	if state == InteractionState.COMMAND_SELECT_TARGET:
+		_advance_pending_target()
+	elif state == InteractionState.FACTION_SELECT_AMOUNT:
+		_on_faction_amount_confirmed()
 
 func _attack_target_candidates(context: EffectContext) -> Array[int]:
 	var attack_def: ItemAttackCardDefinition = selected_definition
@@ -366,6 +636,9 @@ func _attack_target_candidates(context: EffectContext) -> Array[int]:
 
 func _on_self_space_pressed(space_number: int) -> void:
 	if current_match.is_over():
+		return
+	if state == InteractionState.IDLE and current_match.current_turn.phase == Turn.Phase.DAYBREAK:
+		_on_daybreak_space_pressed(space_number)
 		return
 	match state:
 		InteractionState.SUMMON_SELECT_SPACE:
@@ -422,6 +695,37 @@ func _on_self_space_pressed(space_number: int) -> void:
 			var instance := turn.buy_and_summon_from_market(elemental_market, selected_market_index, space_number)
 			_refresh_all()
 			status_label.text = "Summoned %s directly." % card_name if instance != null else "Couldn't summon directly there."
+		InteractionState.FACTION_SELECT_TARGET:
+			var turn := current_match.current_turn
+			if not _occupied_spaces(turn.players[0].formation).has(space_number):
+				_clear_selection()
+				return
+			if not turn.spend_faction_action_ap(6):
+				_clear_selection()
+				return
+			FactionActions.cedar_level_6(_build_context(), space_number)
+			_refresh_all()
+			status_label.text = "Boosted the chosen Elemental."
+		InteractionState.FACTION_SELECT_SOURCE:
+			var boosted := _boosted_spaces(current_match.current_turn.players[0].formation)
+			if not boosted.has(space_number):
+				_clear_selection()
+				return
+			pending_faction_source_space = space_number
+			var card := current_match.current_turn.players[0].formation.get_card(space_number)
+			state = InteractionState.FACTION_SELECT_AMOUNT
+			_show_amount_spin_box(mini(3, card.boost_count))
+			status_label.text = "How many boosts (1-%d) to spend?" % faction_amount_spin_box.max_value
+		InteractionState.FACTION_SELECT_AMOUNT:
+			pass  # use the SpinBox + Confirm button -- board clicks are a no-op here
+		InteractionState.FACTION_GRAVEL6_PICK_SPACE:
+			var occupied := _occupied_spaces(current_match.current_turn.players[0].formation)
+			if not occupied.has(space_number):
+				return  # no-op, not a cancel -- shields are already off the board (see _start_gravel_level_6())
+			pending_faction_source_space = space_number
+			state = InteractionState.FACTION_SELECT_AMOUNT
+			_show_amount_spin_box(gravel_shields_remaining)
+			status_label.text = "How many of the %d shield(s) go on this Elemental?" % gravel_shields_remaining
 		_:
 			_clear_selection()
 
@@ -447,6 +751,27 @@ func _on_enemy_space_pressed(space_number: int) -> void:
 		_refresh_all()
 	elif state == InteractionState.COMMAND_SELECT_TARGET:
 		_on_command_space_pressed(space_number, false)
+	elif state == InteractionState.FACTION_SELECT_ENEMY_TARGET:
+		var enemy_occupied := _occupied_spaces(current_match.current_turn.opponents[0].formation)
+		if not enemy_occupied.has(space_number):
+			_clear_selection()
+			return
+		var turn := current_match.current_turn
+		var context := _build_context()
+		if pending_faction_kind == "cedar8":
+			if not turn.spend_faction_action_ap(8):
+				_clear_selection()
+				return
+			FactionActions.cedar_level_8(context, pending_faction_source_space, pending_faction_amount, space_number)
+		elif pending_faction_kind == "gravel8":
+			if not turn.spend_faction_action_ap(8):
+				_clear_selection()
+				return
+			FactionActions.gravel_level_8(context, pending_faction_amount, space_number)
+		_refresh_all()
+		status_label.text = "Faction action resolved."
+	elif state == InteractionState.FACTION_SELECT_AMOUNT:
+		pass  # use the SpinBox + Confirm button -- board clicks are a no-op here
 	else:
 		_clear_selection()
 

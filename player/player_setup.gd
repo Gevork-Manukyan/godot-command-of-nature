@@ -60,14 +60,26 @@ static func new_team(sage_name_1: String, chosen_warrior_names_1: Array, sage_na
 ## rather than partially applied further.
 static func _setup_player(state: PlayerState, sage_name: String, chosen_warrior_names: Array,
 		basic_spaces: Array[int], warrior_sage_warrior_spaces: Array[int]) -> bool:
-	var sage_def := _find_sage(sage_name)
+	# ChampionCards/WarriorCards/SageCards build fresh CardDefinitions with no
+	# .ability at all -- only CardLibrary.all() attaches those (see
+	# CardLibrary._attach_abilities()), same as anything bought later from a
+	# Market (which already sources through CardLibrary.all()). Without this,
+	# every Sage/Warrior/Champion placed by setup would have its Daybreak and
+	# triggered abilities silently inert for the rest of the game -- a real
+	# bug this file previously had, found while wiring up Daybreak's UI.
+	var library := CardLibrary.get_all()
+	var sage_def := _find_sage(sage_name, library)
 	if sage_def == null:
 		push_error("PlayerSetup: unknown Sage %s" % sage_name)
 		return false
 	var element: CardEnums.Element = sage_def.element
 
-	var champions := ChampionCards.by_element(element)
-	var starter_warriors := _starters(WarriorCards.by_element(element))
+	var champions: Array[ElementalChampionCardDefinition] = []
+	for card in ChampionCards.by_element(element):
+		champions.append(library.get(card.card_name, card))
+	var starter_warriors: Array[ElementalWarriorCardDefinition] = []
+	for card in _starters(WarriorCards.by_element(element)):
+		starter_warriors.append(library.get(card.card_name, card))
 	var starter_basics := _starters(BasicCards.by_element(element))
 	if champions.size() != 3 or starter_warriors.size() != 3 or starter_basics.size() != 1:
 		push_error("PlayerSetup: expected 3 Champions, 3 starter Warriors, 1 starter Basic for %s" % CardEnums.Element.keys()[element])
@@ -110,11 +122,9 @@ static func _setup_player(state: PlayerState, sage_name: String, chosen_warrior_
 
 	return true
 
-static func _find_sage(sage_name: String) -> ElementalSageCardDefinition:
-	for sage in SageCards.all():
-		if sage.card_name == sage_name:
-			return sage
-	return null
+static func _find_sage(sage_name: String, library: Dictionary) -> ElementalSageCardDefinition:
+	var card = library.get(sage_name)
+	return card if card is ElementalSageCardDefinition else null
 
 static func _starters(cards: Array) -> Array:
 	var result := []
