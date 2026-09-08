@@ -46,7 +46,7 @@ static func _far_strike() -> Array[CardAbility]:
 		AbilityBuilder.ability(
 			CardEnums.AbilityTrigger.ON_PLAY,
 			[AbilityBuilder.effect(CardEnums.AbilityAction.DEAL_DAMAGE,
-				[AbilityBuilder.target(CardEnums.TargetScope.FORMATION, CardEnums.Team.ENEMY)],
+				[AbilityBuilder.target(CardEnums.TargetScope.ROWS_AWAY, CardEnums.Team.ENEMY, [2])],
 				0, CardEnums.AmountSource.ATTACKER_STRENGTH)],
 			"Deal DMG equal to the attacking Elemental's STR to an Elemental 2 rows away in your opponent's formation."),
 	]
@@ -66,7 +66,7 @@ static func _farsight_frenzy() -> Array[CardAbility]:
 		AbilityBuilder.ability(
 			CardEnums.AbilityTrigger.ON_PLAY,
 			[AbilityBuilder.effect(CardEnums.AbilityAction.DEAL_DAMAGE,
-				[AbilityBuilder.target(CardEnums.TargetScope.FORMATION, CardEnums.Team.ENEMY)],
+				[AbilityBuilder.target(CardEnums.TargetScope.ROWS_AWAY, CardEnums.Team.ENEMY, [3])],
 				-1, CardEnums.AmountSource.ATTACKER_STRENGTH)],
 			"Deal DMG equal to the attacking Elemental's STR -1 to an Elemental 3 rows away in your opponent's formation."),
 	]
@@ -106,7 +106,7 @@ static func _primitive_strike() -> Array[CardAbility]:
 		AbilityBuilder.ability(
 			CardEnums.AbilityTrigger.ON_PLAY,
 			[AbilityBuilder.effect(CardEnums.AbilityAction.DEAL_DAMAGE,
-				[AbilityBuilder.target(CardEnums.TargetScope.FORMATION, CardEnums.Team.ENEMY)],
+				[AbilityBuilder.target(CardEnums.TargetScope.ROWS_AWAY, CardEnums.Team.ENEMY, [2])],
 				0, CardEnums.AmountSource.ATTACKER_STRENGTH)],
 			"Deal DMG equal to the attacking Elemental's STR to an Elemental 2 rows away in your opponent's formation. If the attacking Elemental is a Basic Elemental, add 1 to its STR during the attack."),
 	]
@@ -116,7 +116,7 @@ static func _projectile_blast() -> Array[CardAbility]:
 		AbilityBuilder.ability(
 			CardEnums.AbilityTrigger.ON_PLAY,
 			[AbilityBuilder.effect(CardEnums.AbilityAction.DEAL_DAMAGE,
-				[AbilityBuilder.target(CardEnums.TargetScope.FORMATION, CardEnums.Team.ENEMY)],
+				[AbilityBuilder.target(CardEnums.TargetScope.ROWS_AWAY, CardEnums.Team.ENEMY, [2])],
 				0, CardEnums.AmountSource.ATTACKER_STRENGTH)],
 			"Deal DMG equal to the attacking Elemental's STR to an Elemental 2 rows away in your opponent's formation."),
 	]

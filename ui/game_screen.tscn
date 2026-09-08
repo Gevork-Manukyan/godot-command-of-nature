@@ -1,0 +1,126 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://ui/game_screen.gd" id="1"]
+[ext_resource type="Script" path="res://ui/formation_display.gd" id="2"]
+[ext_resource type="Script" path="res://ui/card_row_display.gd" id="3"]
+[ext_resource type="Script" path="res://ui/turn_status_display.gd" id="4"]
+
+[node name="GameScreen" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1")
+
+[node name="Scroll" type="ScrollContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+horizontal_scroll_mode = 0
+
+[node name="Margin" type="MarginContainer" parent="Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/margin_left = 10
+theme_override_constants/margin_top = 10
+theme_override_constants/margin_right = 10
+theme_override_constants/margin_bottom = 10
+
+[node name="Layout" type="VBoxContainer" parent="Scroll/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="StatusLabel" type="Label" parent="Scroll/Margin/Layout"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Loading..."
+
+[node name="EnemyFormation" type="VBoxContainer" parent="Scroll/Margin/Layout"]
+unique_name_in_owner = true
+layout_mode = 2
+script = ExtResource("2")
+
+[node name="SelfFormation" type="VBoxContainer" parent="Scroll/Margin/Layout"]
+unique_name_in_owner = true
+layout_mode = 2
+script = ExtResource("2")
+
+[node name="HandRow" type="HBoxContainer" parent="Scroll/Margin/Layout"]
+unique_name_in_owner = true
+layout_mode = 2
+script = ExtResource("3")
+
+[node name="MarketSection" type="VBoxContainer" parent="Scroll/Margin/Layout"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="MarketRow" type="HBoxContainer" parent="Scroll/Margin/Layout/MarketSection"]
+layout_mode = 2
+theme_override_constants/separation = 30
+
+[node name="ElementalMarketColumn" type="VBoxContainer" parent="Scroll/Margin/Layout/MarketSection/MarketRow"]
+layout_mode = 2
+
+[node name="ElementalMarketLabel" type="Label" parent="Scroll/Margin/Layout/MarketSection/MarketRow/ElementalMarketColumn"]
+layout_mode = 2
+text = "Elemental Market"
+
+[node name="ElementalMarketRow" type="HBoxContainer" parent="Scroll/Margin/Layout/MarketSection/MarketRow/ElementalMarketColumn"]
+unique_name_in_owner = true
+layout_mode = 2
+script = ExtResource("3")
+
+[node name="ElementalMarketRefreshButton" type="Button" parent="Scroll/Margin/Layout/MarketSection/MarketRow/ElementalMarketColumn"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Refresh Elemental Market"
+
+[node name="CommandMarketColumn" type="VBoxContainer" parent="Scroll/Margin/Layout/MarketSection/MarketRow"]
+layout_mode = 2
+
+[node name="CommandMarketLabel" type="Label" parent="Scroll/Margin/Layout/MarketSection/MarketRow/CommandMarketColumn"]
+layout_mode = 2
+text = "Command Market"
+
+[node name="CommandMarketRow" type="HBoxContainer" parent="Scroll/Margin/Layout/MarketSection/MarketRow/CommandMarketColumn"]
+unique_name_in_owner = true
+layout_mode = 2
+script = ExtResource("3")
+
+[node name="CommandMarketRefreshButton" type="Button" parent="Scroll/Margin/Layout/MarketSection/MarketRow/CommandMarketColumn"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Refresh Command Market"
+
+[node name="BottomRow" type="HBoxContainer" parent="Scroll/Margin/Layout"]
+layout_mode = 2
+theme_override_constants/separation = 20
+
+[node name="TurnStatus" type="VBoxContainer" parent="Scroll/Margin/Layout/BottomRow"]
+unique_name_in_owner = true
+layout_mode = 2
+script = ExtResource("4")
+
+[node name="DrawButton" type="Button" parent="Scroll/Margin/Layout/BottomRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Draw"
+
+[node name="SwapButton" type="Button" parent="Scroll/Margin/Layout/BottomRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Swap"
+
+[node name="AdvancePhaseButton" type="Button" parent="Scroll/Margin/Layout/BottomRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Advance Phase"
+
+[node name="ConfirmButton" type="Button" parent="Scroll/Margin/Layout/BottomRow"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+text = "Confirm Selection"

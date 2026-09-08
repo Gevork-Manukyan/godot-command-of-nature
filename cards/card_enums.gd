@@ -60,6 +60,12 @@ enum TargetScope {
 	DISCARD_PILE,
 	HAND,
 	ATTACKING_ELEMENTAL,
+	## "N rows away" (Far Strike, Farsight Frenzy, Primitive Strike,
+	## Projectile Blast) -- target.rows[0] holds N, the distance counted
+	## along the whole board through the attacker's own rows and into the
+	## opponent's, not a fixed row number. Resolved in
+	## TargetResolver._rows_away_candidates().
+	ROWS_AWAY,
 }
 
 enum TargetSelection { ALL, CHOOSE_N }

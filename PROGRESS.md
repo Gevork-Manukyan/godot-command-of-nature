@@ -1087,7 +1087,581 @@ teammate's are proven unaffected — tested by unlocking the same level on
 both and getting different results), then the second Sage falls and the
 match correctly ends with the right side declared winner.
 
+## Old prototype removed; first visual piece built (2026-09-07)
+
+**Removed the tutorial prototype**: `game.gd`/`card.gd`/`game.tscn`/`card.tscn`
+(the original standard-52-card-deck demo) deleted outright — confirmed
+nothing else in the repo referenced them first. Cleared `project.godot`'s
+now-dangling `run/main_scene` (it pointed at the deleted `game.tscn`); the
+project currently has no main scene at all, which is expected until a real
+one exists. Also swept up `verify_abilities.gd.uid`, an orphaned sidecar
+file left over from an early deleted verify script.
+
+**`ui/card_display.gd` + `ui/card_display.tscn`** — the first actual visual
+piece: a single reusable `CardDisplay` (`PanelContainer`) that renders any
+`CardDefinition` alone (e.g. a Market listing) or paired with a live
+`CardInstance` for board state (remaining HP instead of base HP, shield/
+boost/damage badges). No card art exists yet (every `CardDefinition.art` is
+unset), so the art area is an element-tinted `ColorRect` placeholder —
+swappable for a `TextureRect` later without touching anything else.
+
+**Real bug found and fixed while verifying, not a test-only issue**: caching
+node references via `@onready var x = %Name` meant `set_card()` silently
+no-op'd (nulls internally) if called before the instantiated scene ever
+entered a `SceneTree` — e.g. building a card display and configuring it
+*before* adding it to a hand/board container, which is a completely normal
+thing for a caller to want to do. Fixed by resolving `%UniqueName` lookups
+live inside `_refresh()` instead of caching them — unique-name resolution
+only needs `owner` to be set (already true immediately after
+`PackedScene.instantiate()`), not a live tree, so this works whether the
+node has entered a tree yet or not.
+
+**Verified two ways**: headlessly (wiring/values correct for a Warrior with
+an ability, a Basic with no ability, a Command with no stats, a Sage, and a
+null card hiding the whole display — both before and after entering a live
+tree, to specifically re-exercise the bug above) and visually — actually
+launched Godot non-headless (a real window opened fine, Metal renderer) and
+captured a real screenshot via `get_viewport().get_texture().get_image().save_png()`.
+That screenshot caught two real visual defects neither the headless check
+nor just reading the code would have: long ability text overflowed the
+card's fixed height and bled onto the background (fixed: taller card, a
+smaller ability-text font, `clip_contents = true` as a safety net for
+whatever's still too long), and Pebble-element cards landed on almost the
+exact same gray as the neutral Command placeholder color (fixed: Commands
+now use a distinct indigo, Pebble a warmer stone tan). Confirmed the fix
+with a second screenshot. All capture/verification scripts and the PNG were
+temporary and deleted after use, per the established pattern.
+
+## Formation board visual (2026-09-07)
+
+`ui/formation_display.gd` — `FormationDisplay` (`VBoxContainer`), the
+second visual piece: renders an entire `Formation` (any size) as one
+horizontal row per `row_capacities` entry, Row I at the top, each space in
+ascending `space_number` order. Occupied spaces get a `CardDisplay`
+instance (definition + live `CardInstance`, so damage/shield/boost badges
+show correctly); empty spaces get a dim placeholder showing the space
+number (useful now as a debugging aid, later for picking a target/summon
+space in the real game UI). Pure GDScript, no `.tscn` — unlike
+`CardDisplay`'s fixed layout, everything here is built dynamically from
+whatever `Formation` it's given, so there was no static structure worth
+hand-authoring a scene file for. Rebuilds from scratch on every
+`set_formation()` call rather than diffing — fine for a handful of Control
+nodes at a time; revisit if this ever needs to update every frame during
+live play instead of on-demand.
+
+Verified visually the same way as `CardDisplay` (see the entry above,
+[[reference-godot-gotchas]]): captured a real non-headless screenshot for
+both a 2-player formation (1/2/3 rows, one card pre-damaged+shielded to
+confirm the badge shows on the *right* card) and a 4-player team's shared
+12-space formation (2/4/6 rows) — the latter is a genuinely useful
+confirmation, since it visually shows **both Sages sitting on one shared
+board** (Torrent and Gravel, Row III), the exact structure the 4-player
+team-setup work built and verified headlessly earlier, now visibly correct
+too. The narrower front rows (2 of 6, 4 of 6 possible slots in 4-player)
+centered naturally from `HBoxContainer.ALIGNMENT_CENTER` — no extra layout
+code needed to get the "staggered pyramid" shape described in the
+rulebook's setup diagrams. One small `CardDisplay` polish surfaced along
+the way and folded back in since it affects every card, not just this
+view: long names (e.g. "Granite Rampart") were clipping flush against the
+cost number with no indication of truncation — added ellipsis trimming
+(`text_overrun_behavior`) and a slightly smaller name font.
+
+## Hand/discard/market row visual (2026-09-07)
+
+`ui/card_row_display.gd` — `CardRowDisplay` (`HBoxContainer`), the third
+visual piece: a horizontal row of `CardDisplay` instances for a flat list
+of cards. `set_zone(zone: CardZone)` covers hand/discard/removed pile;
+`set_cards(cards: Array[CardDefinition])` covers a `Market`'s `face_up`
+listing directly, since `Market` isn't a `CardZone`. Deliberately **one**
+generalized component instead of separate `HandDisplay`/`MarketDisplay`
+classes — a hand, a discard pile, and a market listing are all just "a row
+of cards" at the display level; the difference is entirely in what data
+feeds them, not how they render. Same as `FormationDisplay`: pure GDScript
+(no static layout worth a `.tscn`), read-only, rebuilds from scratch on
+every call.
+
+Verified visually: a real 5-card hand (mixed Commands/Basics, ability text
+wrapping correctly for each) and a real Elemental Market's 3-card face-up
+listing (`Market.new_elemental_market().face_up`) side by side in one
+screenshot — confirmed the same `CardDisplay` component reused cleanly
+across three different data sources (board, hand, market) with zero
+per-context special-casing needed.
+
+`ui/` now has three components — `CardDisplay` (one card), `FormationDisplay`
+(a whole board), `CardRowDisplay` (any flat list of cards) — covering every
+place cards appear except a Sage board / faction-action panel, which
+doesn't have card-shaped content to reuse `CardDisplay` for anyway.
+
+## Turn status HUD (2026-09-07)
+
+`ui/turn_status_display.gd` — `TurnStatusDisplay` (`VBoxContainer`), the
+fourth visual piece: a read-only HUD for a `Turn` — phase, AP remaining/max
+(4 or 6, matching `Turn.MAX_AP_2_PLAYER`/`MAX_AP_4_PLAYER`), the shared gold
+pool, and **each player's level shown separately** with their unlocked
+faction-action levels (only rendered when non-empty). Level is individual
+per player even in 4-player team mode — showing one combined number would
+have been actively wrong, since a team's two players can be at different
+levels (or one can be capped out after their Sage falls, see the earlier
+Match section). No card-based content here, so this doesn't reuse
+`CardDisplay`/`CardRowDisplay` — just plain `Label`s built the same
+rebuild-from-scratch way as the other three components.
+
+Verified visually with two real `Turn`s side by side in one screenshot: a
+2-player turn (AP correctly down from 4 after 2 draws, level correctly at 5
+with `[4]` unlocked after 4 defeats) and a 4-player team turn where only
+one of the two teammates was leveled up — confirmed the display shows
+"Level: 1 (Player 1)" / "Level: 5 (Player 2) / Unlocked faction actions:
+[4]" separately and correctly, not a single merged number.
+
+## First interactive game screen (2026-09-07)
+
+The first genuinely *interactive* piece — click a hand card, click a board space,
+watch the actual `Turn`/`Match` state resolve and every display refresh — not
+just another read-only view. Plan file:
+`.claude/plans/okay-i-want-you-sleepy-lagoon.md` has the full design writeup
+(state machine, scoping rationale); this section covers what actually
+happened building and verifying it, including several real Godot gotchas
+this specific kind of work finally surfaced.
+
+**Scope, confirmed with the user up front**: a hardcoded 2-player dev
+`Match` (Cedar vs. Gravel, the same pairs used throughout this session's
+verify scripts) rather than a Sage/Warrior picker screen; and a minimal
+action slice (draw, summon, one single-target Attack Command) rather than
+every standard action — swap, non-attack Commands, Market, faction
+actions, and Daybreak all reuse the exact same click-to-select/click-to-
+target/refresh pattern built here, so they're fast follow-ups, not a
+redesign.
+
+**Click primitives added to the existing display components**:
+- `CardDisplay` gained `signal pressed(display)` (via `_gui_input()`, left-click)
+  and `set_selected(bool)` (a `modulate` tint highlight).
+- `FormationDisplay` gained `signal space_pressed(space_number)` and
+  `highlight_spaces()`/`clear_highlight()` (a `self_modulate` tint per slot —
+  deliberately `self_modulate`, not `modulate`, so a highlighted board slot
+  never visually compounds with a `CardDisplay` child's own independent
+  `modulate`-based selection tint). A real wiring subtlety caught before it
+  became a bug: an *occupied* slot's `CardDisplay` child has its own
+  `mouse_filter = STOP`, which consumes the click before it can bubble to
+  the slot's own `gui_input` — so occupied-slot clicks are bridged by
+  connecting the child `CardDisplay.pressed` signal into `space_pressed`
+  too, not by relying on the slot's own `gui_input` (which only ever
+  actually fires for *empty* slots).
+
+**`ui/game_screen.gd` + `.tscn`** — composes all four existing display
+components. One shared `_build_context()` builds the `TargetContext`/
+`EffectContext` from `current_turn.players[0]`/`opponents[0]` once, instead
+of re-assembling the same constructor call per action (same "one shared
+function" principle as `TargetResolver.formation_for()`). A small explicit
+`InteractionState` enum (IDLE / SUMMON_SELECT_SPACE / ATTACK_SELECT_ATTACKER
+/ ATTACK_SELECT_TARGET) drives the click flow; a mis-click in any non-IDLE
+state just cancels back to IDLE rather than erroring. `_refresh_all()` is
+the single place that re-syncs all four displays from `current_turn` state
+and resets interaction state after every resolved action.
+
+**Custom class_name types (`type="FormationDisplay"` etc.) don't reliably
+resolve as `.tscn` node types outside the editor process.** `game_screen.tscn`
+originally declared its `FormationDisplay`/`CardRowDisplay`/`TurnStatusDisplay`
+children directly by class name; this parsed fine under `--editor --quit`
+but failed with "Cannot get class" under a plain `--headless --script` run
+(placeholder nodes got created instead). Fixed by using the same reliable
+pattern `CardDisplay.tscn` already used: a plain built-in base type
+(`VBoxContainer`/`HBoxContainer`) with the script attached via
+`[ext_resource type="Script"]`, not the class name as the node `type=`.
+
+**Real bug found and fixed, would have hit any repeatedly-refreshed
+component**: `CardRowDisplay.set_cards()` and `FormationDisplay._rebuild()`
+both cleared old children with `child.queue_free()` alone — which *defers*
+removal to end-of-frame, so `get_children()`/`get_child_count()` still saw
+the stale children if the same component got rebuilt again before that
+deferred free actually ran (exactly what happens every time `GameScreen`
+calls `_refresh_all()` after an action). Caught via a genuine symptom, not
+by inspection: after a second refresh, hand-card click signals were
+"already connected" (re-connecting to stale un-freed nodes) and
+`hand_row.get_child_count()` read 11 instead of 6. Fixed by calling
+`remove_child(child)` (synchronous) before `child.queue_free()` (still
+deferred, since this can run from inside a child's own click-signal
+handler — freeing it synchronously mid-signal would be unsafe) — this is
+now documented in [[reference-godot-gotchas]] as a general pattern for any
+future rebuild-on-refresh UI component.
+
+**Two more gotchas hit specifically while getting real interactive/visual
+verification working, both folded into [[reference-godot-gotchas]]**:
+1. `_ready()`/`@onready` don't fire reliably when a scene is manually
+   `add_child()`-ed from inside a bare `SceneTree` script's `_init()` (the
+   pattern almost every `verify_*.gd` script this session used) — confirmed
+   again here (this is the same root cause `CardDisplay`'s `%UniqueName`
+   fix addressed earlier, now hit at the whole-scene level). Fixed the
+   *verification* script with `await process_frame` (twice) before reading
+   state — `GameScreen` itself correctly keeps using `@onready`, since real
+   engine-driven scene loading (running it as the actual main scene) calls
+   `_ready()` synchronously and reliably; this is purely an artifact of the
+   SceneTree-script harness, not something `GameScreen` needs to guard against.
+2. A real OS window gets silently clamped to the physical display's usable
+   height (requested 2200px, macOS granted ~1674px) — resizing the window
+   wider than the screen doesn't get you more space to screenshot. Fixed
+   by rendering into a `SubViewport` instead (no physical-display limit,
+   also sidesteps the project's `canvas_items` window-stretch settings
+   entirely) — but a `SubViewport` also defaults to
+   `render_target_update_mode = UPDATE_WHEN_VISIBLE`, and one that's never
+   attached to an on-screen `SubViewportContainer` is never "visible," so
+   it renders nothing (a fully black capture) until forced with
+   `UPDATE_ALWAYS`.
+
+**Verified two ways**: headlessly (scene builds without errors; initial
+state — phase, AP, hand size, both formations' full starting rosters —
+matches the dev `Match` exactly; the child-accumulation fix confirmed by
+refreshing twice and checking child count stays correct instead of
+growing) and with genuine synthetic-input interaction (not just screenshots
+of static state) — injected two known cards for determinism, then actually
+drove the full click sequence: click an Elemental in hand → confirm
+`SUMMON_SELECT_SPACE` and the right spaces highlighted → click a highlighted
+space → confirm the card left the hand, landed on the board, and AP dropped
+→ click an Attack Command → click an eligible attacker → click a
+highlighted enemy target → confirm the target actually took damage (a
+2-HP `Cobble` correctly defeated by 2 `STR` damage) and AP dropped again.
+Screenshot captured at the end showed the whole thing consistently: both
+full formations, the correct hand contents, and the status panel showing
+**Level: 2** — confirming the defeat correctly triggered `level_up()`
+through the entire `Turn.play_attack_command()` → `CombatResolver` chain,
+a detail the printed checks hadn't even explicitly tested for.
+
+**Set as the project's main scene** (`project.godot`'s `run/main_scene`) so
+it's actually playable via the normal Play button, not just from verify
+scripts.
+
+**Real usability gap found from the user actually running it, not from any
+of the above verification**: the full stacked layout (two boards + hand +
+status) is far taller than the project's default window (1152×648) — and
+with `window/stretch/mode="canvas_items"`, a too-small window doesn't just
+require scrolling, it shows an arbitrary *middle* slice of the content
+rather than the top. All of this session's verification used a full-size
+(or `SubViewport`-rendered) capture, so this never surfaced until the user
+tried it in a normal window. Fixed by wrapping `Margin`/`Layout` in a
+`ScrollContainer` (`horizontal_scroll_mode` disabled, vertical left on
+auto) so any window size now shows the top of the content with a working
+scrollbar for the rest, instead of a confusing unscrollable partial view.
+A reminder that a screenshot from a script-controlled capture isn't the
+same check as someone actually opening the thing.
+
+## Turn hand-off wired up (2026-09-07)
+
+Extended `GameScreen` to actually call `Match.finish_turn()` instead of
+stopping at "act within one Turn." `_on_advance_phase_pressed()` now checks
+whether the current phase is already `CLEANUP`: if so, pressing the button
+calls `current_match.finish_turn()` (which itself re-validates the Cleanup
+hand-size gate, checks the win condition, and only then hands off) instead
+of `Turn.advance_phase()`. The button's label switches to "End Turn" once
+in Cleanup so it's clear the same button now does something different.
+Once `current_match.is_over()`, the Draw/Advance Phase buttons disable and
+every click handler (hand card, self space, enemy space) no-ops instead of
+acting on a decided match — this slice has no "start a new match" flow, so
+stopping cleanly there is the intended end state, not a gap.
+
+Verified headlessly: walked a full turn to Cleanup and pressed "End Turn"
+— confirmed `players[0]`/`opponents[0]` actually swapped (Cedar → Gravel
+acting), the new `Turn` started fresh at `DAYBREAK`, and the button label
+reset. Separately defeated a Sage and confirmed `is_over()`/`winner()`
+resolve correctly, the status label reports the winner, and both buttons
+disable.
+
+## Board orientation + attack-flow feedback fixes (2026-09-07)
+
+Two real problems found by the user actually playing it, not by any of
+this session's verification:
+
+**Board orientation was backwards.** Both `FormationDisplay`s rendered Row I
+at the top, so the two boards' front lines (Row I) ended up at opposite
+ends of the screen instead of facing each other in the middle — not how
+the physical board reads. `FormationDisplay` gained `reverse_rows: bool`
+(set before `set_formation()`); `GameScreen` sets it on
+`enemy_formation_display` only. Top to bottom is now: opponent Row III,
+II, I, then your Row I, II, III — both Row Is meeting in the middle.
+Verified visually and by checking the actual rendered row order (first
+`HBoxContainer` child has 3 slots — Row III — for the reversed side,
+1 slot — Row I — for the normal side).
+
+**Attack flow gave no feedback when nothing was eligible.** If the acting
+player has no unattacked Elemental in the Attack Command's required row,
+or the opponent has nothing in the targeted spot, `_eligible_attacker_spaces()`/
+`_attack_target_candidates()` correctly returned empty arrays — but
+`GameScreen` highlighted nothing and left the generic "Choose an
+attacker..."/"Choose a target..." message up, so the player was just stuck
+looking at an unresponsive board with no idea why. Easy to hit even in the
+demo's starting position (the opponent only has one card in Row I to begin
+with, defeat it once and the next Close Strike attempt would silently do
+nothing). Fixed: both selection steps now check for an empty candidate
+list *before* transitioning state, and show a specific explanation instead
+("No eligible attacker for Close Strike right now (needs an Elemental in
+Row I that hasn't attacked yet)." / "No legal target for Close Strike
+right now (the opponent has nothing there to hit)."), reverting to IDLE
+rather than leaving the player in a dead-end state. The two "in-progress"
+messages also now name which board to look at ("highlighted on your
+board" / "highlighted on the opponent's board").
+
+Verified headlessly: confirmed the row-reversal renders the expected slot
+counts per visual row, and both zero-candidate paths (attacker, target)
+correctly stay/return to IDLE with the specific explanatory message
+instead of silently stalling.
+
+## CardDisplay layout: attack/health flank the name (2026-09-07)
+
+User-requested layout change: attack value top-left, card name top-middle,
+health top-right, cost moved to bottom-right (previously cost sat next to
+the name in the header, and attack/health were a single combined
+`STR / HP`-style line under the art). `card_display.tscn`'s header row is
+now `AttackLabel | NameLabel (centered, expanding) | HealthLabel`;
+`CostLabel` moved out of the header to the bottom of the card, right-
+aligned. `card_display.gd._refresh()` now sets `AttackLabel`/`HealthLabel`
+directly instead of a combined `StatsLabel` string, still hiding both for
+non-Elemental cards (Commands) exactly as the old combined stats line did.
+
+Verified visually (Elemental with live damage/shield, a Command hiding
+attack/health correctly, cost bottom-right on every card) and confirmed
+`FormationDisplay`/`CardRowDisplay` (which just embed `CardDisplay`
+unchanged) still render correctly on top of the new internal layout — no
+changes needed there, since they never depended on `CardDisplay`'s internal
+node structure, only its public `set_card()` API.
+
+## Real ability-data bug: "N rows away" targeting (2026-09-07)
+
+User asked "what does Far Strike do?" while testing attacks — led to
+finding a genuine, previously unnoticed bug in the card *data*, not the UI.
+Four ranged Attack Commands' `raw_text` says "an Elemental **N rows away**
+in your opponent's formation" (Far Strike: 2, Farsight Frenzy: 3, Primitive
+Strike: 2, Projectile Blast: 2), but all four were structurally implemented
+as `TargetScope.FORMATION` with no row restriction at all — meaning they
+could actually hit *any* occupied enemy space, anywhere on the board,
+completely ignoring their own stated row restriction. Confirmed by reading
+`TargetResolver._by_occupancy()` directly: an empty `rows` array (what
+`FORMATION` scope always passes) is treated as "every row qualifies," not
+"no rows." Checked every other Attack Command's text for the same pattern
+first (`grep -rn "rows away"`) — exactly these 4, nothing missed.
+`Distant Double Strike` (fixed Row II, not relative) and `Magic Ether
+Strike` ("in your opponent's formation," no distance stated) were already
+correctly modeled and left untouched.
+
+**The exact meaning of "N rows away" needed the user's own explanation**,
+not something derivable from the card text alone: the count runs along the
+*whole* board as one continuous line — through the attacker's own rows,
+across the boundary, into the opponent's — not restarting at 0 inside the
+opponent's formation. Confirmed directly: "if you use \[Far Strike\] in my
+row 2, that's the opponent's row 1, because the counting includes my own
+rows." Worked out the formula from that one example and verified it
+produces a valid row (1–3) for every row each of the 4 cards can legally
+be played from: **target_row = N − attacker_row + 1**.
+
+**New targeting concept added**: `CardEnums.TargetScope.ROWS_AWAY` (target
+data-driven card abilities didn't have a "distance from the attacker"
+concept before this — every existing scope was either fixed-row or
+unrestricted). `AbilityTarget.rows[0]` reused to hold N rather than adding
+a new field, mirroring how `ROW` already uses `rows` for literal row
+numbers.
+`TargetResolver._rows_away_candidates()`: finds the attacker's current row
+via `context.self_formation.find_space_of(context.attacking_card)`,
+applies the formula, and resolves via the same `_by_occupancy()` helper
+every other row-based scope uses — no candidates if the computed row falls
+off the board (doesn't happen for any of the 4 real cards, but a card with
+a different N/row_requirement combination could hit this) or if
+`attacking_card` isn't set yet.
+
+**Real integration bug found and fixed alongside it**: `GameScreen._build_context()`
+built a fresh `TargetContext` without ever passing `attacking_card` —
+harmless for every other scope, since `Turn.play_attack_command()` sets it
+internally right before resolving, but fatal for the *pre-resolution*
+highlight step (`_attack_target_candidates()`, called to decide what to
+light up *before* the player clicks a target), which calls
+`TargetResolver.get_candidates()` directly. Fixed by passing
+`selected_attacker` through — it's `null` until an attacker's actually
+chosen, which is fine, since `ROWS_AWAY` is the only scope that needs it at
+that stage and nothing reads it before then.
+
+Verified: the formula against all 4 cards' full legal-row range (12 cases
+total across the two distinct N values); a full `CombatResolver.resolve_attack()`
+call proving Far Strike cast from Row II actually deals damage to a card
+sitting in the opponent's Row I; Close Strike unaffected (regression
+check); and the `GameScreen` integration end-to-end — choosing an attacker
+in Row II for Far Strike correctly highlights only the opponent's Row I,
+not Row II.
+
+## Wired up Swap and Utility Commands (2026-09-07)
+
+Extended `GameScreen` with two more actions from the deferred list, reusing
+the same click-to-select/click-to-target/refresh pattern the first
+interactive pass established.
+
+**Real bug found and fixed before wiring up "play a non-attack Command" at
+all**: `Turn.play_command()` accepted *any* non-Attack Item card, including
+Instants — but every Instant's ability triggers on `ON_ATTACKED`/
+`ON_MELEE_ATTACKED`/`ON_RANGED_ATTACKED`, never `ON_PLAY`. Per the
+rulebook, Instants are the only Command playable on the *opponent's* turn,
+in response to being attacked (resolved via `CombatResolver.resolve_attack()`'s
+`instant_effects` parameter, chosen by the defending player — a "respond to
+attack" flow this project hasn't built yet). Routing an Instant through
+`play_command()` would silently no-op: spend AP, discard it, find no
+`ON_PLAY` ability to fire, and do nothing the card actually says. Fixed
+`Turn.play_command()` to only accept `ItemType.UTILITY`; `GameScreen` shows
+a clear explanation instead of a silent no-op if you click an Instant
+during your own turn.
+
+**Second real bug found and fixed, in `Turn` itself**: `swap_connected()`
+only checked `Formation.are_connected()`, not that both spaces actually
+held an Elemental — the rulebook says "swap the positions of 2 connected
+**Elementals**." Without the check, you could "swap" an occupied space
+with an empty one, effectively a free unvalidated move. Fixed by requiring
+both `get_card()` calls to be non-null.
+
+**Swap**: a new `Swap` button starts `SWAP_SELECT_FIRST`/`SWAP_SELECT_SECOND`
+— pick any occupied space on your board, then any occupied space connected
+to it (`_connected_occupied_spaces()`, a new small query mirroring
+`Formation.get_valid_summon_spaces()`), then `Turn.swap_connected()`.
+
+**Utility Commands** — the more involved piece: `Turn.play_command()`
+already fires whatever a Utility Command's `ON_PLAY` ability can resolve on
+its own and returns the leftover effects still needing a target (per
+`AbilityFirer.fire()`'s existing contract). `GameScreen` now walks through
+those one target at a time, in declared order (`pending_effects`/
+`pending_target_index`/`pending_chosen`), generalizing the attack-target
+pattern to handle what none of the 4 Utility Commands avoid: **more than
+one target per effect** (`SWAP_FIELD_POSITION` — Elemental Swap, Exchange
+of Nature — needs two separate picks resolved in sequence before the swap
+itself executes) and **more than one effect per command** (Obliterate:
+remove-boosts-and-shields, then deal damage, executed as two sequential
+single-target steps). A new "Confirm Selection" button appears whenever a
+target's `count > 1`, since `TargetSelection.CHOOSE_N` always means "up to
+count," not "exactly" (already the case elsewhere in the codebase, e.g.
+`TargetResolver.validate_choice()`) — without it there'd be no way to
+stop early on a target that allows fewer picks than its max.
+
+**Explicitly out of scope this round**: Utility Commands needing a
+`HAND`/`DISCARD_PILE` target (Elemental Incantation's "discard 3 from your
+hand") — picking a hand card to fulfill a pending target needs to be told
+apart from "click this hand card to play it," a distinction `GameScreen`
+doesn't make yet. `_begin_pending_effect()` detects this up front and says
+so explicitly rather than breaking silently; whatever the command already
+resolved automatically before hitting that effect still happened.
+
+**A real bug caught while testing, not by inspection**: re-clicking an
+already-selected space during multi-select was treated as an invalid
+click and cancelled the *entire* selection, instead of being a harmless
+no-op. Fixed by checking "already chosen" before "is it a legal candidate
+at all," and returning early without touching any state.
+
+Verified headlessly: Swap (by reference identity, not just matching card
+names — Cedar's Row I/II cards actually traded places); Obliterate's two
+sequential single-target effects (boosts/shields cleared, *then* damage
+landed, in that order); Elemental Swap's two-targets-in-one-effect case
+(confirmed by object identity, since both spaces coincidentally held
+same-named cards — matching names alone wouldn't have proven anything
+actually moved); Instants correctly refused with an explanatory message
+and no state consumed; and, via a synthetic multi-select effect (since
+none of the 4 real Utility Commands currently reach a working `count > 1`
+case — Incantation's is blocked by the `HAND`-scope gap above), the
+Confirm-early and duplicate-click-is-a-no-op paths specifically.
+
+## Wired up the Market (2026-09-07)
+
+Added the Elemental and Command Markets to `GameScreen`, reusing
+`CardRowDisplay` exactly as designed back when it was built (`set_cards(market.face_up)`
+was already spot-tested with a real `Market` at that point — this just
+makes it live and clickable). Two `Market` instances built alongside the
+dev `Match`; a `MarketSection` (both markets side by side, each with its
+own `CardRowDisplay` + "Refresh" button) is shown only during the Market
+phase.
+
+**Buying** resolves immediately on click (`Turn.buy_from_market()`, no
+target choice needed — it always goes to the discard pile). **Selling**
+reuses the existing hand-click entry point: `_on_hand_card_pressed()` now
+checks the phase first and sells instead of playing when in Market phase,
+since summon/attack/play_command are all Actions-phase-only anyway, so a
+hand click could never have meant "play" during Market phase regardless.
+**Refresh** is a plain button per market.
+
+**Explicitly out of scope**: "buy and summon directly"
+(`Market.ELEMENTAL_DIRECT_SUMMON_SURCHARGE`) — a plain purchase always
+lands in the discard pile; paying the surcharge to summon straight onto
+the board needs its own space-selection step layered on top of buying,
+deferred for now (noted in `GameScreen`'s class doc alongside the other
+explicit scope cuts).
+
+**Real usability bug caught from the screenshot, not a script check**:
+the Draw and Swap buttons stayed enabled during the Market/Cleanup phases,
+even though both are Actions-phase-only under the hood
+(`Turn._spend_ap()`) — clicking either outside Actions would silently
+no-op with no feedback. Fixed by disabling both outside the Actions phase
+(Market cards/refresh were already correctly gated for free, since the
+whole `MarketSection` is hidden outside the Market phase). Another
+reminder that a screenshot catches things headless data checks don't.
+
+Verified headlessly: the Market panel only appears during the Market
+phase with 3 real face-up cards each; buying moves the right card to
+discard, spends the right gold, and the slot refills; an unaffordable
+purchase is rejected cleanly with a clear message and the listing
+unchanged; selling a hand card during Market phase adds the correct
+`sell_value` gold and shrinks the hand; refreshing changes the face-up
+listing while keeping it at 3 cards; and Draw/Swap are correctly disabled
+outside the Actions phase (both during Market and Cleanup).
+
+## Real bug: buying from either Market silently did nothing (2026-09-07)
+
+User report: "everything seems to work except buying from either shop." The
+headless verification of the Market wiring above only ever called
+`_on_market_card_pressed()` directly, never through an actual click — so it
+never exercised the signal-binding path a real click goes through, and it
+missed a real signature bug there.
+
+`CardDisplay.pressed` always emits with `self` as its one argument
+(`pressed.emit(self)`); `_refresh_all()` binds `(market, index)` on top of
+that with `.connect(_on_market_card_pressed.bind(elemental_market, i))`, so
+the actual call is `_on_market_card_pressed(display, market, index)` — 3
+arguments. The handler was declared `_on_market_card_pressed(market: Market,
+index: int)`, missing the leading `display` parameter the signal always
+sends (the hand-card handler got this right:
+`_on_hand_card_pressed(display: CardDisplay, hand_index: int)` — the market
+one just didn't match the pattern). Every click threw "Method expected 2
+argument(s), but called with 3" and the click silently did nothing — no
+crash visible to a player, no status update either.
+
+Fixed by adding the missing leading parameter:
+`_on_market_card_pressed(_display: CardDisplay, market: Market, index: int)`.
+
+Caught this time by actually driving a real click — a synthetic
+`InputEventMouseButton` pushed through `Viewport.push_input(event, true)` (the
+`true` is `in_local_coords`; without it the event is interpreted in real
+desktop screen coordinates, which don't line up with the window's own
+coordinate space and every synthetic click silently misses, hand cards
+included — a second gotcha this same investigation turned up, see
+`reference_godot_gotchas.md`) at the card's `get_global_rect()` center,
+after scrolling it into view within the window's actual clamped height. This
+is a stronger verification technique than either plain data-assertion
+scripts or a static screenshot — it's the first time this session a signal
+*call itself* was exercised end-to-end rather than just the handler function
+called directly. Re-verified: buying from both markets now spends the right
+gold, discards the right card, refills the slot, and an unaffordable buy
+still correctly says so.
+
 ## Not done yet / explicitly deferred
+- **Shift-forward-on-defeat.** When a card is defeated, `Formation.remove_card()`
+  correctly just clears that space rather than auto-compacting (see the
+  "Formation board" section above — the rulebook makes *which* card moves
+  up the player's choice whenever more than one connected back-row
+  candidate exists, so it can't be a mechanical auto-shift). But the actual
+  player-facing flow was never built: detect that a front row now has an
+  empty space with an occupied space behind it, offer the player the
+  connected candidate(s) to move up (`Formation.move_card()` already
+  exists as the primitive), and check whether *that* move opened a new gap
+  one row further back — repeating until every row that can be filled is
+  filled. Flagged back when `Formation` was first built and explicitly
+  deferred to "the future resolver," but never circled back to despite all
+  the resolver/UI work since — rediscovered when the user asked directly
+  whether this was handled. **Deliberately left deferred** (user's own
+  call): this needs the same underlying capability as playing Instants in
+  response to being attacked (also deferred — see `Turn.play_command()`'s
+  doc comment) — pausing the *active* player's action to prompt the
+  *non-active* side for input, then resuming. `GameScreen` has no such
+  flow at all yet (everything so far is single-side, one action at a
+  time). Bundle these two together as one future increment once that
+  prompt-the-other-side capability gets built, rather than building it
+  twice.
 - **The ~50 extra cards found on the wiki** (new Warriors like Aqua Acrobat/
   Cobra King/Rock Buck, new Attacks/Instants, and a whole new "Ritual Command"
   card type) — user explicitly chose to scope this pass to the existing 86
@@ -1115,13 +1689,24 @@ match correctly ends with the right side declared winner.
   from "players pick Sages/Warriors" through to a running `Match` (the old
   repo's `GameState`'s JOINING_GAME/SAGE_SELECTION/WARRIOR_SELECTION phases
   have no equivalent here) — not needed until there's a UI to drive it.
+- **The rest of the interactive game screen** — draw/summon/single-target
+  Attack Command/swap/Utility Commands/Market/turn hand-off/win condition
+  all work now, but still not wired up: faction actions, Daybreak
+  abilities, multi-target Attack Commands, Utility Commands needing a
+  `HAND`/`DISCARD_PILE` target (Elemental Incantation), and "buy and
+  summon directly" at the Market — all reuse the same click-to-select/
+  click-to-target/refresh primitives already built, so each is a fast
+  follow-up, not a redesign. Also still no Sage/Warrior setup-picker screen
+  (the dev `Match` is hardcoded) and no 4-player screen support (the
+  interaction code assumes `players[0]`/a single hand; extending to a
+  team's two hands is its own increment). No "start a new match" flow
+  either — the screen just stops once `is_over()`.
 - Tokens as physical/visual game elements (vs. the plain `int` counters
-  already on `CardInstance`) — not relevant until there's a UI.
-- Old prototype's `game.gd`/`card.gd` not yet connected to any of the new
-  `cards/`/`board/`/`zones/`/`resolver/`/`market/`/`player/` systems — still
-  the original standard-deck 2-card-hand demo.
+  already on `CardInstance`) — `CardDisplay` shows them as text badges for
+  now; real token art can replace that later without changing the data path.
 - No card art (`art` is unset on every card — old repo also had `img: ""` for
-  everything, so there's nothing to port yet).
+  everything, so there's nothing to port yet). `CardDisplay` uses an
+  element-tinted placeholder in the meantime.
 
 ## How to pick this back up
 The user works in small increments and brings the next piece themselves (a card,

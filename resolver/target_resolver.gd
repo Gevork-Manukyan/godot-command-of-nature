@@ -32,6 +32,8 @@ static func get_candidates(target: AbilityTarget, context: TargetContext, requir
 			return _by_occupancy(formation_for(target, context), require_occupied, target.rows)
 		CardEnums.TargetScope.FORMATION:
 			return _by_occupancy(formation_for(target, context), require_occupied, [])
+		CardEnums.TargetScope.ROWS_AWAY:
+			return _rows_away_candidates(target, context, require_occupied)
 		CardEnums.TargetScope.HAND:
 			return _zone_indices(_hand_for(target.team, context))
 		CardEnums.TargetScope.DISCARD_PILE:
@@ -90,6 +92,29 @@ static func _single(formation: Formation, card: CardInstance) -> Array[int]:
 		return []
 	var space_number := formation.find_space_of(card)
 	return [space_number] if space_number != -1 else []
+
+## "N rows away" (Far Strike, Farsight Frenzy, Primitive Strike, Projectile
+## Blast) -- target.rows[0] holds N, a distance counted along the whole
+## board, through the attacking Elemental's own rows and into the
+## opponent's, not a fixed row number. Confirmed directly with the user:
+## from your own Row II, "2 rows away" is the opponent's Row I -- the count
+## crosses the boundary between formations rather than restarting at the
+## opponent's Row I. So target_row = N - attacker_row + 1. Needs
+## context.attacking_card to know where to count from; returns no
+## candidates if that's unset (nothing chosen yet) or the computed row
+## doesn't exist on this size formation.
+static func _rows_away_candidates(target: AbilityTarget, context: TargetContext, require_occupied: bool) -> Array[int]:
+	if context.attacking_card == null or target.rows.is_empty():
+		return []
+	var attacker_space := context.self_formation.find_space_of(context.attacking_card)
+	if attacker_space == -1:
+		return []
+	var attacker_row := context.self_formation.get_space(attacker_space).row
+	var target_row: int = target.rows[0] - attacker_row + 1
+	var enemy_formation := formation_for(target, context)
+	if enemy_formation == null or target_row < 1 or target_row > enemy_formation.row_capacities.size():
+		return []
+	return _by_occupancy(enemy_formation, require_occupied, [target_row])
 
 static func _by_occupancy(formation: Formation, require_occupied: bool, rows: Array[int]) -> Array[int]:
 	if formation == null:

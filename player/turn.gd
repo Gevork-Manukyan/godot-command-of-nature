@@ -129,22 +129,38 @@ func summon_from_hand(hand_index: int, space_number: int, player_index: int = 0)
 	_formation().summon(instance, space_number)
 	return instance
 
+## Per the rulebook: "Swap the positions of 2 connected Elementals" -- both
+## spaces must actually hold an Elemental, not just be connected.
+## Formation.swap_cards() itself has no such restriction (it'll happily
+## swap with an empty space, which would act as a free, unvalidated move),
+## so that check belongs here at the action layer.
 func swap_connected(space1: int, space2: int) -> bool:
 	if not _formation().are_connected(space1, space2):
 		push_error("Turn: spaces %d and %d aren't connected" % [space1, space2])
+		return false
+	if _formation().get_card(space1) == null or _formation().get_card(space2) == null:
+		push_error("Turn: both spaces must hold an Elemental to swap")
 		return false
 	if not _spend_ap(STANDARD_ACTION_COST):
 		return false
 	return _formation().swap_cards(space1, space2)
 
-## Plays a non-Attack Command (Instant or Utility) from hand. Returns
-## whatever its ON_PLAY effects couldn't resolve on their own (see
-## AbilityFirer.fire()).
+## Plays a Utility Command from hand. Returns whatever its ON_PLAY effects
+## couldn't resolve on their own (see AbilityFirer.fire()). Instants are
+## deliberately NOT accepted here even though they're also non-Attack Item
+## cards -- per the rulebook they're the only Command playable on the
+## OPPONENT's turn, in response to being attacked, and every Instant's
+## ability is ON_ATTACKED/ON_MELEE_ATTACKED/ON_RANGED_ATTACKED triggered,
+## never ON_PLAY. Routing one through here would silently no-op (spend AP,
+## discard it, find no ON_PLAY ability to fire) instead of doing what the
+## card actually says -- Instants belong in CombatResolver.resolve_attack()'s
+## instant_effects instead, chosen by the defending player when an attack
+## resolves (a "respond to attack" flow this project hasn't built yet).
 func play_command(hand_index: int, context: EffectContext, player_index: int = 0) -> Array:
 	var acting := _player(player_index)
 	var definition := _peek_hand(hand_index, player_index)
-	if definition == null or definition is ItemAttackCardDefinition or not (definition is ItemCardDefinition):
-		push_error("Turn: play_command needs an Instant/Utility Command in hand (use play_attack_command for Attacks)")
+	if definition == null or not (definition is ItemCardDefinition) or definition.item_type != CardEnums.ItemType.UTILITY:
+		push_error("Turn: play_command needs a Utility Command in hand (Attacks use play_attack_command; Instants are played in response to an attack, not here)")
 		return []
 	if not _spend_ap(STANDARD_ACTION_COST):
 		return []
