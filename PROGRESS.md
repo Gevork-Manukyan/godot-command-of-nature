@@ -1639,6 +1639,41 @@ called directly. Re-verified: buying from both markets now spends the right
 gold, discards the right card, refills the slot, and an unaffordable buy
 still correctly says so.
 
+## Buy and summon directly (2026-09-07)
+
+Wired up `Turn.buy_and_summon_from_market()` (already existed, backed by real
+game logic since the Market module was built — see `market/market.gd`'s
+`ELEMENTAL_DIRECT_SUMMON_SURCHARGE`, never previously exposed in
+`GameScreen`). The rulebook makes this always-optional: pay 2 extra gold
+on top of an Elemental's price and it lands straight in an empty formation
+space instead of the discard pile.
+
+Since a plain buy and a surcharged direct summon are both always legal and
+it's the player's choice which one they want, this isn't guessed from
+context (e.g. "auto-summon whenever there's room") — a new `DirectSummonToggle`
+`CheckButton` in the Elemental Market column makes the choice explicit
+before the click: toggle off, a click buys normally (unchanged); toggle on,
+a click on an Elemental Market card starts a click-to-target flow
+(`InteractionState.MARKET_SUMMON_SELECT_SPACE`, same shape as summoning
+from hand) highlighting `Formation.get_valid_summon_spaces()`, and clicking
+a highlighted space resolves the buy+surcharge+summon atomically through
+the existing `Turn` method. If gold or space isn't there when the card's
+clicked, it says so and doesn't change any state, rather than starting a
+targeting flow doomed to fail. The Command Market has no such toggle
+effect at all (Commands are never `ElementalCardDefinition`s) — clicking
+there always plain-buys regardless of the toggle's state.
+
+Verified headlessly: plain buy still works with the toggle off; with it on,
+buying spends `price + surcharge` gold, puts the card on the board (not the
+discard pile) at the chosen space, and leaves the discard pile untouched;
+an unaffordable-or-no-space attempt is rejected with a specific message and
+no state change; the Command Market ignores the toggle entirely; a mis-click
+cancels back to idle. Note: a fresh 2-player formation starts completely
+full (1+2+3 row capacities, exactly what setup places), so this path is
+only reachable once a formation space actually opens up (a card defeated,
+or the not-yet-built shift-forward flow) — the test freed a space manually
+to exercise it, same as a real game would need a defeat to happen first.
+
 ## Not done yet / explicitly deferred
 - **Shift-forward-on-defeat.** When a card is defeated, `Formation.remove_card()`
   correctly just clears that space rather than auto-compacting (see the

@@ -19,15 +19,18 @@ extends Control
 ## Also buys/sells/refreshes at the Elemental and Command Markets (shown
 ## only during the Market phase) -- clicking a hand card during that phase
 ## sells it instead of playing it, since play_command()/summon_from_hand()/
-## play_attack_command() are all Actions-phase-only anyway.
+## play_attack_command() are all Actions-phase-only anyway. The Elemental
+## Market's DirectSummonToggle checkbox opts into paying
+## Market.ELEMENTAL_DIRECT_SUMMON_SURCHARGE to summon straight onto the
+## board instead of the discard pile -- an explicit toggle rather than
+## something guessed from context, since a plain buy and a surcharged
+## direct summon are both always legal and the rulebook leaves the choice
+## to the player (same "never auto-pick a player's choice" principle as
+## everywhere else in this project).
 ##
 ## Still not wired up: faction actions and Daybreak abilities -- they'd
 ## reuse the exact same click-to-select/click-to-target/refresh pattern
 ## built in this file, so they're fast follow-ups, not a redesign.
-## "Buy and summon directly" (Market.ELEMENTAL_DIRECT_SUMMON_SURCHARGE) also
-## isn't wired up -- a plain purchase always goes to the discard pile;
-## paying the surcharge to summon straight onto the board needs its own
-## space-selection step layered on top of buying, deferred for now.
 ## Multi-target Attack Commands aren't handled (only the first target's
 ## candidates are offered) -- fine for the single-target Attack Commands
 ## this slice exercises. Utility Commands needing a HAND/DISCARD_PILE
@@ -42,6 +45,7 @@ extends Control
 enum InteractionState {
 	IDLE, SUMMON_SELECT_SPACE, ATTACK_SELECT_ATTACKER, ATTACK_SELECT_TARGET,
 	SWAP_SELECT_FIRST, SWAP_SELECT_SECOND, COMMAND_SELECT_TARGET,
+	MARKET_SUMMON_SELECT_SPACE,
 }
 
 @onready var status_label: Label = %StatusLabel
@@ -58,6 +62,7 @@ enum InteractionState {
 @onready var command_market_row: CardRowDisplay = %CommandMarketRow
 @onready var elemental_market_refresh_button: Button = %ElementalMarketRefreshButton
 @onready var command_market_refresh_button: Button = %CommandMarketRefreshButton
+@onready var direct_summon_toggle: CheckButton = %DirectSummonToggle
 
 var current_match: Match
 var elemental_market: Market
@@ -67,6 +72,9 @@ var selected_hand_index: int = -1
 var selected_definition: CardDefinition
 var selected_attacker: CardInstance
 var selected_swap_space: int = -1
+## Which Elemental Market slot is pending a direct summon (see
+## MARKET_SUMMON_SELECT_SPACE) -- only meaningful in that state.
+var selected_market_index: int = -1
 ## A Utility Command's effects still needing a target, in order (see
 ## _start_command_targeting()) -- popped from the front as each resolves.
 var pending_effects: Array[AbilityEffect] = []
@@ -155,6 +163,7 @@ func _refresh_all() -> void:
 	advance_phase_button.disabled = over
 	elemental_market_refresh_button.disabled = over
 	command_market_refresh_button.disabled = over
+	direct_summon_toggle.disabled = over
 	_clear_selection()
 	if over:
 		status_label.text = "Match over! Side %d wins." % current_match.winner()
@@ -170,6 +179,7 @@ func _clear_selection() -> void:
 	selected_definition = null
 	selected_attacker = null
 	selected_swap_space = -1
+	selected_market_index = -1
 	pending_effects = []
 	pending_target_index = 0
 	pending_chosen = []
@@ -403,6 +413,15 @@ func _on_self_space_pressed(space_number: int) -> void:
 			_refresh_all()
 		InteractionState.COMMAND_SELECT_TARGET:
 			_on_command_space_pressed(space_number, true)
+		InteractionState.MARKET_SUMMON_SELECT_SPACE:
+			var turn := current_match.current_turn
+			if not turn.players[0].formation.get_valid_summon_spaces().has(space_number):
+				_clear_selection()
+				return
+			var card_name: String = elemental_market.face_up[selected_market_index].card_name
+			var instance := turn.buy_and_summon_from_market(elemental_market, selected_market_index, space_number)
+			_refresh_all()
+			status_label.text = "Summoned %s directly." % card_name if instance != null else "Couldn't summon directly there."
 		_:
 			_clear_selection()
 
@@ -450,11 +469,15 @@ func _on_swap_pressed() -> void:
 	self_formation_display.highlight_spaces(occupied)
 	status_label.text = "Choose the first Elemental to swap (on your board)."
 
-## Buying never needs a target choice (it always goes to the discard pile
-## in this slice -- see the class doc for why "buy and summon directly"
-## isn't wired up), so it resolves immediately on click, same as Draw.
+## A plain buy never needs a target choice (it always goes to the discard
+## pile), so it resolves immediately on click, same as Draw -- unless
+## DirectSummonToggle is on and this is an Elemental Market slot, in which
+## case it needs a space choice first (see _start_direct_summon()).
 func _on_market_card_pressed(_display: CardDisplay, market: Market, index: int) -> void:
 	if state != InteractionState.IDLE or current_match.is_over():
+		return
+	if market == elemental_market and direct_summon_toggle.button_pressed:
+		_start_direct_summon(index)
 		return
 	var bought := current_match.current_turn.buy_from_market(market, index)
 	_refresh_all()
@@ -462,6 +485,27 @@ func _on_market_card_pressed(_display: CardDisplay, market: Market, index: int) 
 		status_label.text = "Can't afford that right now."
 	else:
 		status_label.text = "Bought %s." % bought.card_name
+
+## Per the rulebook, paying Market.ELEMENTAL_DIRECT_SUMMON_SURCHARGE on top
+## of an Elemental's price brings it straight into the formation instead of
+## the discard pile, if there's an empty space -- Turn.buy_and_summon_from_market()
+## already does the actual buy+summon+gold-spend atomically, this just
+## collects the space choice for it first, same click-to-target shape as
+## summoning from hand.
+func _start_direct_summon(index: int) -> void:
+	var turn := current_match.current_turn
+	var card_def: CardDefinition = elemental_market.face_up[index]
+	var total_cost: int = card_def.price + Market.ELEMENTAL_DIRECT_SUMMON_SURCHARGE
+	var valid_spaces := turn.players[0].formation.get_valid_summon_spaces()
+	if turn.players[0].gold.amount < total_cost or valid_spaces.is_empty():
+		status_label.text = "Can't summon %s directly right now -- needs %d gold total and an empty formation space. Turn off Direct Summon to just buy it instead." \
+			% [card_def.card_name, total_cost]
+		return
+	selected_market_index = index
+	state = InteractionState.MARKET_SUMMON_SELECT_SPACE
+	self_formation_display.highlight_spaces(valid_spaces)
+	status_label.text = "Choose a space to summon %s directly (+%d gold)." \
+		% [card_def.card_name, Market.ELEMENTAL_DIRECT_SUMMON_SURCHARGE]
 
 func _on_market_refresh_pressed(market: Market) -> void:
 	if current_match.is_over():
